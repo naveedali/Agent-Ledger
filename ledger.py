@@ -8,6 +8,7 @@ Usage:
         add --private to keep ledger/ out of git (local only)
   python3 ledger.py today  [--date DATE]    Build the digest and print it
   python3 ledger.py compile [--date DATE]   Build the digest (saves DIGEST.md)
+  python3 ledger.py status                  Check the setup / why nothing was logged
 
 DATE is YYYY-MM-DD or 'yesterday'. No dependencies. Python 3.8+.
 """
@@ -131,8 +132,10 @@ def init_global() -> None:
     cursor_rule.write_text(rules, encoding="utf-8")
     print(f"\nCursor: open Settings → Rules → User Rules and paste the contents of")
     print(f"  {short(cursor_rule)}")
-    print(f"\nNo files were added to any project. See your day with:")
-    print(f"  python3 {script} today")
+    print(f"\nNo files were added to any project. Next:")
+    print(f"  1. Restart any open agent sessions (agents read the rules when a session starts)")
+    print(f"  2. Give an agent a task, then run:  python3 {script} today")
+    print(f"  Something not logging?  python3 {script} status")
 
 
 def init_project(project: Path, private: bool) -> None:
@@ -146,25 +149,55 @@ def init_project(project: Path, private: bool) -> None:
     rules = agent_rules(PROJECT_DIR_NAME, f"{PROJECT_DIR_NAME}/ledger.py", with_repo=False)
     print(f"Agent Ledger set up in PROJECT mode: {project}\n")
     print(f"  {'ledger/ledger.py':<28} copied")
+    hide = [f"/{PROJECT_DIR_NAME}/", "/.claude/commands/digest.md"]
+    tracked_edits = []
     for name in ("AGENTS.md", "CLAUDE.md"):
-        print(f"  {name:<28} {add_rules(project / name, rules)}")
+        result = add_rules(project / name, rules)
+        print(f"  {name:<28} {result}")
+        if result == "created" or not is_tracked(project, name):
+            hide.append(f"/{name}")
+        else:
+            tracked_edits.append(name)
     cmd = project / ".claude" / "commands" / "digest.md"
     cmd.parent.mkdir(parents=True, exist_ok=True)
     cmd.write_text(digest_command(f"{PROJECT_DIR_NAME}/ledger.py"), encoding="utf-8")
     print(f"  {'.claude/commands/digest.md':<28} created (/digest in Claude Code)")
 
     if private:
-        exclude = project / ".git" / "info" / "exclude"
-        if exclude.parent.is_dir():
-            text = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-            if f"/{PROJECT_DIR_NAME}/" not in text.split():
-                exclude.write_text(text + ("" if text.endswith("\n") or not text else "\n")
-                                   + f"/{PROJECT_DIR_NAME}/\n", encoding="utf-8")
-            print(f"  {'.git/info/exclude':<28} ledger/ hidden from git (local only)")
+        if (project / ".git").is_dir():
+            add_git_exclude(project, hide)
+            print(f"  {'.git/info/exclude':<28} Agent Ledger files hidden from git (local only)")
+            for name in tracked_edits:
+                print(f"\n  Note: {name} is already tracked by git, so the added rule will show")
+                print(f"  in `git diff`. To keep repos fully clean, use:  init --global")
         else:
             print("  (not a git repo, --private skipped)")
 
-    print("\nDone. Give an agent a task, then run:  python3 ledger/ledger.py today")
+    print("\nDone. Next:")
+    print("  1. Restart any open agent sessions (agents read the rules when a session starts)")
+    print("  2. Give an agent a task, then run:  python3 ledger/ledger.py today")
+    print("  Something not logging?  python3 ledger/ledger.py status")
+
+
+def is_tracked(project: Path, name: str) -> bool:
+    try:
+        out = subprocess.run(["git", "ls-files", "--error-unmatch", name], cwd=project,
+                             capture_output=True, text=True, timeout=10)
+        return out.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def add_git_exclude(project: Path, patterns) -> None:
+    exclude = project / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    text = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    existing = set(text.split())
+    new = [p for p in patterns if p not in existing]
+    if new:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        exclude.write_text(text + "\n".join(new) + "\n", encoding="utf-8")
 
 
 def ask_mode() -> str:
@@ -299,6 +332,11 @@ def build_digest(mode: str, logs: Path, project, day: str) -> str:
     out.append(f"Agents: {agents}" + (f"  \nProjects: {', '.join(projects)}" if projects else ""))
     out.append("")
 
+    if not entries and commits:
+        out.append("> ⚠️ Commits found but no agent logged anything today. "
+                   "Run `ledger.py status` to see why.")
+        out.append("")
+
     out.append("## ✅ Done")
     out += [line(e) for e in entries if e["status"] == "DONE"] or ["_Nothing logged._"]
     out.append("")
@@ -355,6 +393,74 @@ def cmd_compile(args, show=False) -> None:
     print(digest if show else f"Wrote {day_dir / 'DIGEST.md'}")
 
 
+# ---------------------------------------------------------------- status
+
+def has_rules(path: Path) -> bool:
+    return path.exists() and MARK_START in path.read_text(encoding="utf-8", errors="ignore")
+
+
+def cmd_status(args) -> None:
+    mode, logs, project = locate()
+    day = parse_date(args)
+    ok, warn = "✅", "⚠️ "
+    problems = []
+
+    print(f"Agent Ledger status — {day}\n")
+    print(f"  Mode:   {mode}")
+    print(f"  Logs:   {short(logs / day)}/")
+
+    # 1. Are the rules where the agents will read them?
+    if mode == "project":
+        checks = [("Codex / Cursor", project / "AGENTS.md"), ("Claude Code", project / "CLAUDE.md")]
+    else:
+        checks = [("Claude Code", Path.home() / ".claude" / "CLAUDE.md"),
+                  ("Codex", Path.home() / ".codex" / "AGENTS.md")]
+    print("\n  Rules")
+    for agent, path in checks:
+        found = has_rules(path)
+        print(f"    {ok if found else warn} {agent:<15} {short(path)}")
+        if not found:
+            problems.append(f"Rule missing for {agent}. Run `init` again.")
+    if mode == "global":
+        print(f"    ·  {'Cursor':<15} paste {short(logs / 'CURSOR_RULE.md')} into Settings → Rules → User Rules")
+
+    # 2. Did anyone log today?
+    day_dir = logs / day
+    files = sorted(p for p in day_dir.glob("*.md") if p.name != "DIGEST.md") if day_dir.is_dir() else []
+    entries = [e for f in files for e in parse_log(f)]
+    print("\n  Today")
+    for f in files:
+        n = len(parse_log(f))
+        print(f"    {ok} {f.stem:<15} {n} entr{'y' if n == 1 else 'ies'}")
+    if not files:
+        print(f"    {warn} no agent has logged yet")
+
+    if mode == "project":
+        commits = git_commits(project, day)
+        print(f"    ·  {len(commits)} commit{'' if len(commits) == 1 else 's'} in this repo")
+        if commits and not entries:
+            print(f"    {warn} work was committed today, but no agent logged it")
+
+    if mode == "global" and (Path.cwd() / ".git").is_dir() and has_rules(Path.cwd() / "AGENTS.md"):
+        print(f"\n    {warn} This repo also has a project-mode rule in AGENTS.md; agents here")
+        print(f"       will log to ./ledger/ instead of {short(logs)}.")
+
+    if not entries:
+        problems += [
+            "Agents read the rules when a session STARTS. Restart sessions that were open during `init`.",
+            "Check you're in the right place: each project needs its own `init --project`, "
+            "or use `init --global` to cover every project.",
+            "Remind the agent once: \"log what you just did in the ledger\".",
+        ]
+
+    if problems:
+        print("\n  If nothing is being logged:")
+        for i, p in enumerate(dict.fromkeys(problems), 1):
+            print(f"    {i}. {p}")
+    else:
+        print("\n  All good.")
+
+
 # ---------------------------------------------------------------- main
 
 def main() -> None:
@@ -369,6 +475,8 @@ def main() -> None:
         cmd_compile(rest)
     elif cmd == "today":
         cmd_compile(rest, show=True)
+    elif cmd == "status":
+        cmd_status(rest)
     else:
         sys.exit(f"Unknown command: {cmd}\n{__doc__}")
 
