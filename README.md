@@ -5,28 +5,35 @@
 You ask Claude, Codex and Cursor to do the work, and by evening you can't remember what got done. Agent Ledger fixes that: each agent writes a short note when it finishes a task, and one command turns those notes into a clean daily digest.
 
 - ✅ Works with **Claude Code, Codex, Cursor**, and any agent that reads `AGENTS.md`
-- 📄 Plain Markdown files in your repo. No server, no account, no tracking
+- 📄 Plain Markdown files. No server, no account, no tracking
 - 🐍 One Python file, zero dependencies
 
 ---
 
 ## How it works
 
-```
-your-project/
-  AGENTS.md            ← tells every agent to log its work
-  CLAUDE.md            ← same rule for Claude Code
-  ledger/
-    ledger.py
-    2026-11-05/
-      claude.md        ← each agent writes only its own file
-      codex.md
-      cursor.md
-      DIGEST.md        ← compiled summary of the day
-```
+1. **Agents log.** After each task, an agent adds a short entry to its own file for the day (`claude.md`, `codex.md`, ...).
+2. **You compile.** Run one command (or ask any agent) and get `DIGEST.md`: what's done, what's blocked, follow-ups, and the day's git commits.
 
-1. **Agents log.** After each task, an agent adds a short entry to `ledger/<today>/<agent>.md`.
-2. **You compile.** Run one command (or ask any agent) and get `DIGEST.md`: what's done, what's blocked, follow-ups, and today's git commits.
+## Pick a mode
+
+| | 🌍 **Global** (recommended) | 📁 **Project** |
+|---|---|---|
+| Where logs live | `~/agent-ledger/` | `ledger/` inside the project |
+| Files added to your repos | **None** | `ledger/`, `AGENTS.md`, `CLAUDE.md` |
+| Covers | All your projects in one digest | One project |
+| Best for | Freelancers, client work, side projects | Teams who want shared logs in the repo |
+
+Not sure? Choose **Global**. You can use both at the same time.
+
+```
+Global mode                          Project mode
+~/agent-ledger/                      your-project/
+  2026-11-05/                          ledger/
+    claude.md                            2026-11-05/
+    codex.md                               claude.md
+    DIGEST.md                              DIGEST.md
+```
 
 ---
 
@@ -38,20 +45,34 @@ your-project/
 git clone https://github.com/naveedali/Agent-Ledger.git
 ```
 
-**2. Set it up in your project**
+**2. Set it up**
 
 ```bash
-python3 Agent-Ledger/ledger.py init path/to/your-project
+python3 Agent-Ledger/ledger.py init
 ```
 
-This adds the logging rules to `AGENTS.md` and `CLAUDE.md` (your existing content is kept), creates the `ledger/` folder, and adds a `/digest` command for Claude Code. Running it again is safe.
+It asks which mode you want. Or skip the question:
+
+```bash
+python3 Agent-Ledger/ledger.py init --global                  # one ledger for everything
+python3 Agent-Ledger/ledger.py init --project path/to/project # ledger inside a project
+python3 Agent-Ledger/ledger.py init --project . --private     # same, but hidden from git
+```
+
+What `init` does:
+
+- **Global:** adds the logging rule to your *personal* agent settings (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`) and adds `/digest` to Claude Code. For **Cursor**, paste the rule from `~/agent-ledger/CURSOR_RULE.md` into *Settings → Rules → User Rules*.
+- **Project:** adds the rule to the project's `AGENTS.md` and `CLAUDE.md` and creates `ledger/`. With `--private`, `ledger/` is hidden from git on your machine only.
+
+Your existing content is always kept, and running `init` again is safe.
 
 **3. Work as usual.** Give your agents tasks. They log as they go.
 
 **4. See your day**
 
 ```bash
-python3 ledger/ledger.py today
+python3 ~/agent-ledger/ledger.py today    # global mode
+python3 ledger/ledger.py today            # project mode
 ```
 
 Or just ask any agent: *"give me today's digest"*. In Claude Code, type `/digest`.
@@ -66,31 +87,34 @@ Agents write this. You don't have to.
 ## 14:32 · Atfal Compass · DONE
 - Task: Add onboarding screen with skip flow
 - Files: OnboardingScreen.kt, NavGraph.kt
+- Repo: ~/code/atfal-compass
 - Follow-up: Needs analytics event
 ```
 
-Status is `DONE`, `PARTIAL` or `BLOCKED`.
+Status is `DONE`, `PARTIAL` or `BLOCKED`. The `Repo:` line is used in global mode so the digest can include that repo's commits.
 
 ## What the digest looks like
 
 ```markdown
 # Daily Digest — 2026-11-05
 
-**3 tasks** · ✅ 1 done · 🟡 1 partial · 🔴 1 blocked · 1 commit
+**3 tasks** · ✅ 1 done · 🟡 1 partial · 🔴 1 blocked · 2 commits
 Agents: claude, codex
+Projects: Atfal Compass, Client App
 
 ## ✅ Done
 - **14:32** · Atfal Compass · _codex_ — Add onboarding screen with skip flow
 
 ## 🟡 Partial / 🔴 Blocked
-- 🟡 **09:10** · Agent Ledger · _claude_ — Write README
-- 🔴 **16:00** · Foodie · _claude_ — Fix payment crash
+- 🟡 **09:10** · Client App · _claude_ — Write README
+- 🔴 **16:00** · Client App · _claude_ — Fix payment crash
 
 ## 📌 Follow-ups
 - [ ] Needs analytics event _(Atfal Compass, codex)_
 
 ## 🔀 Commits
-- `610cfdf` 18:52 feat: onboarding screen
+- `610cfdf` [atfal-compass] 14:40 feat: onboarding screen
+- `a91c2e4` [client-app] 16:20 docs: add README
 ```
 
 ---
@@ -99,17 +123,20 @@ Agents: claude, codex
 
 | Command | What it does |
 |---|---|
-| `python3 ledger.py init [folder]` | Set up Agent Ledger in a project |
-| `python3 ledger/ledger.py today` | Build today's digest and print it |
-| `python3 ledger/ledger.py compile` | Build today's digest (saves `DIGEST.md`) |
-| `python3 ledger/ledger.py compile --date yesterday` | Digest for another day (`yesterday` or `YYYY-MM-DD`) |
+| `ledger.py init` | Set up (asks which mode) |
+| `ledger.py init --global` | Global mode |
+| `ledger.py init --project [folder] [--private]` | Project mode |
+| `ledger.py today` | Build today's digest and print it |
+| `ledger.py compile` | Build today's digest (saves `DIGEST.md`) |
+| `ledger.py compile --date yesterday` | Another day (`yesterday` or `YYYY-MM-DD`) |
 
 ## Auto-compile at the end of the day (optional)
 
 Add a cron job (`crontab -e`) to build the digest every night at 11 PM:
 
 ```bash
-0 23 * * * cd /path/to/your-project && python3 ledger/ledger.py compile
+0 23 * * * python3 ~/agent-ledger/ledger.py compile                      # global
+0 23 * * * cd /path/to/project && python3 ledger/ledger.py compile      # project
 ```
 
 ---
@@ -119,8 +146,8 @@ Add a cron job (`crontab -e`) to build the digest every night at 11 PM:
 **An agent forgot to log. What now?**
 It happens. The digest also lists the day's git commits, so work still shows up. You can also remind the agent: *"log what you just did in the ledger"*.
 
-**Should I commit the `ledger/` folder?**
-Your choice. Commit it to keep a shared history, or add `ledger/20*/` to `.gitignore` to keep it private.
+**Can I change where the global ledger lives?**
+Yes. Set `AGENT_LEDGER_HOME` (for example to a synced folder) before running `init --global`.
 
 **Can I use another agent, like Gemini or Copilot?**
 Yes. Any agent that reads `AGENTS.md` follows the same rule and logs to its own file.
