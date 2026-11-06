@@ -54,21 +54,25 @@ python3 Agent-Ledger/ledger.py init
 It asks which mode you want. Or skip the question:
 
 ```bash
-python3 Agent-Ledger/ledger.py init --global                  # one ledger for everything
-python3 Agent-Ledger/ledger.py init --project path/to/project # ledger inside a project
-python3 Agent-Ledger/ledger.py init --project . --private     # same, but hidden from git
+python3 Agent-Ledger/ledger.py init --global                            # one ledger for everything
+python3 Agent-Ledger/ledger.py init --project path/to/project           # ledger inside a project
+python3 Agent-Ledger/ledger.py init --project path/to/project --private # same, hidden from git
 ```
+
+> 💡 In project mode, point `--project` at **the project your agents work in**, not the Agent-Ledger folder. `.` means the folder you're in right now.
 
 What `init` does:
 
 - **Global:** adds the logging rule to your *personal* agent settings (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`) and adds `/digest` to Claude Code. For **Cursor**, paste the rule from `~/agent-ledger/CURSOR_RULE.md` into *Settings → Rules → User Rules*.
-- **Project:** adds the rule to the project's `AGENTS.md` and `CLAUDE.md` and creates `ledger/`. With `--private`, `ledger/` is hidden from git on your machine only.
+- **Project:** adds the rule to the project's `AGENTS.md` and `CLAUDE.md` and creates `ledger/`. With `--private`, everything Agent Ledger creates is hidden from git on your machine only. (If `AGENTS.md` was already in git, the added rule still shows in `git diff`; use global mode to avoid that.)
 
 Your existing content is always kept, and running `init` again is safe.
 
-**3. Work as usual.** Give your agents tasks. They log as they go.
+**3. Restart your agents.** Agents read their rules when a session starts, so close and reopen any Claude Code, Codex or Cursor session that was already open.
 
-**4. See your day**
+**4. Work as usual.** Give your agents tasks. They log as they go.
+
+**5. See your day**
 
 ```bash
 python3 ~/agent-ledger/ledger.py today    # global mode
@@ -129,6 +133,7 @@ Projects: Atfal Compass, Client App
 | `ledger.py today` | Build today's digest and print it |
 | `ledger.py compile` | Build today's digest (saves `DIGEST.md`) |
 | `ledger.py compile --date yesterday` | Another day (`yesterday` or `YYYY-MM-DD`) |
+| `ledger.py status` | Check the setup and see why nothing was logged |
 
 ## Auto-compile at the end of the day (optional)
 
@@ -141,10 +146,24 @@ Add a cron job (`crontab -e`) to build the digest every night at 11 PM:
 
 ---
 
-## FAQ
+## Troubleshooting: "my agent did work but nothing was logged"
 
-**An agent forgot to log. What now?**
-It happens. The digest also lists the day's git commits, so work still shows up. You can also remind the agent: *"log what you just did in the ledger"*.
+Run this first. It checks the setup and tells you what's wrong:
+
+```bash
+python3 ledger/ledger.py status            # project mode
+python3 ~/agent-ledger/ledger.py status    # global mode
+```
+
+The usual causes:
+
+1. **The session was already open.** Agents read the rules when a session starts. Restart the agent and try again.
+2. **That project isn't set up.** Project mode covers one project only. Run `init --project` in each project, or use `init --global` to cover all of them.
+3. **The agent skipped it.** It happens now and then. Remind it once: *"log what you just did in the ledger"*. The day's git commits still show up in the digest either way.
+
+---
+
+## FAQ
 
 **Can I change where the global ledger lives?**
 Yes. Set `AGENT_LEDGER_HOME` (for example to a synced folder) before running `init --global`.
