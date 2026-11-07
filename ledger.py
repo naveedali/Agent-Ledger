@@ -45,7 +45,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 PROJECT_DIR_NAME = "ledger"
 GLOBAL_MARKER = ".agent-ledger-global"
@@ -1948,7 +1948,7 @@ def cmd_status(args) -> None:
 
 # ---------------------------------------------------------------- main
 
-def main() -> None:
+def _main() -> None:
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help", "help"):
         print(__doc__)
@@ -1994,6 +1994,23 @@ def main() -> None:
     else:
         sys.exit(f"Unknown command: {cmd}\nRun `ledger.py --help` to see the commands. "
                  "(If it's a newer command, your copy may be out of date: run `ledger.py update`.)")
+
+
+def main() -> None:
+    """Entry point. Exits quietly when output is cut short (`| head`) or on Ctrl+C."""
+    try:
+        _main()
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # The reader went away. Point stdout at devnull so Python's own flush at exit can't fail too.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        sys.exit(130)
 
 
 if __name__ == "__main__":
