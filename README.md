@@ -252,7 +252,7 @@ python3 ~/agent-ledger/ledger.py today --open                 # today's digest
 python3 ~/agent-ledger/ledger.py week --redact --open         # last 7 days
 ```
 
-The page has summary tiles, a status bar, every project's work grouped by day, follow-ups and commits. You can filter by status or search tasks, files and agents. It's a single file with no internet needed, works in light and dark mode, and prints cleanly, so *Print → Save as PDF* gives you a report to attach to an email or invoice.
+The page has summary tiles, a status bar, an **Activity** chart (tasks per day by status, and tasks per agent; hover a bar for the numbers), every project's work grouped by day, follow-ups and commits. You can filter by status or search tasks, files and agents. It's a single file with no internet needed, works in light and dark mode, and prints cleanly, so *Print → Save as PDF* gives you a report to attach to an email or invoice.
 
 ---
 
