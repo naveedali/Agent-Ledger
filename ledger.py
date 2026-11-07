@@ -19,6 +19,9 @@ Usage:
                                             Report for the last 7 days
         reports also take --html (formatted page) and --open (open it in your browser)
 
+  python3 ledger.py update                  Refresh installed copies after you upgrade
+  python3 ledger.py --version               Show the version
+
 DATE is YYYY-MM-DD, 'today' or 'yesterday'. No dependencies. Python 3.8+.
 """
 
@@ -31,8 +34,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+__version__ = "0.3.0"
+
 PROJECT_DIR_NAME = "ledger"
 GLOBAL_MARKER = ".agent-ledger-global"
+SOURCE_MARKER = ".agent-ledger-source"   # where an installed copy was copied from
 MARK_START = "<!-- agent-ledger:start -->"
 MARK_END = "<!-- agent-ledger:end -->"
 STATUSES = ("DONE", "PARTIAL", "BLOCKED")
@@ -107,8 +113,74 @@ def add_rules(path: Path, rules: str) -> str:
 
 
 def copy_self(target: Path) -> None:
-    if Path(__file__).resolve() != target.resolve():
-        shutil.copy2(__file__, target)
+    """Install this script at target, remember where it came from, and register the install."""
+    me = Path(__file__).resolve()
+    if me != target.resolve():
+        shutil.copy2(me, target)
+        (target.parent / SOURCE_MARKER).write_text(str(me) + "\n", encoding="utf-8")
+    register_install(target)
+
+
+def registry_file() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "agent-ledger" / "installs.json"
+
+
+def registered_installs():
+    try:
+        return [Path(p) for p in json.loads(registry_file().read_text(encoding="utf-8"))]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def register_install(script: Path) -> None:
+    try:
+        paths = {str(p) for p in registered_installs() if p.exists()}
+        paths.add(str(script.resolve()))
+        registry_file().parent.mkdir(parents=True, exist_ok=True)
+        registry_file().write_text(json.dumps(sorted(paths), indent=1) + "\n", encoding="utf-8")
+    except OSError:
+        pass                                    # tracking installs is a convenience, never a blocker
+
+
+def version_of(script: Path) -> str:
+    try:
+        m = re.search(r'^__version__ = "([^"]+)"', script.read_text(encoding="utf-8"), re.M)
+        return m.group(1) if m else "0.0.0"
+    except OSError:
+        return "0.0.0"
+
+
+def vtuple(v: str):
+    return tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.+-]", v)[:3])
+
+
+def recorded_source(install_dir: Path):
+    try:
+        src = Path((install_dir / SOURCE_MARKER).read_text(encoding="utf-8").strip())
+        return src if src.is_file() else None
+    except OSError:
+        return None
+
+
+def check_args(args, flags=(), value_flags=(), positional=0, cmd=""):
+    """Fail clearly on options this version doesn't know, instead of ignoring them."""
+    i, seen = 0, 0
+    while i < len(args):
+        a = args[i]
+        if a in value_flags:
+            if i + 1 >= len(args):
+                sys.exit(f"{a} needs a value")
+            i += 2
+            continue
+        if a.startswith("-") and a not in flags:
+            sys.exit(f"Unknown option for `{cmd}`: {a}\nRun `ledger.py --help` to see the options. "
+                     "(If it's a newer option, your copy may be out of date: run `ledger.py update`.)")
+        if not a.startswith("-"):
+            seen += 1
+            if seen > positional:
+                sys.exit(f"Unexpected argument for `{cmd}`: {a}\nRun `ledger.py --help` to see the options.")
+        i += 1
 
 
 def short(path: Path) -> str:
@@ -284,6 +356,7 @@ def ask_yes(question: str) -> bool:
 
 
 def cmd_init(args) -> None:
+    check_args(args, flags=("--global", "--project", "--private", "--no-hook"), positional=1, cmd="init")
     flags = [a for a in args if a.startswith("--")]
     paths = [a for a in args if not a.startswith("--")]
     private = "--private" in flags
@@ -472,19 +545,22 @@ def parse_date(args) -> str:
 
 
 def cmd_compile(args, show=False) -> None:
+    check_args(args, flags=("--html", "--open", "--redact"), value_flags=("--date",),
+               cmd="today" if show else "compile")
     mode, logs, project = locate()
     day = parse_date(args)
     day_dir = logs / day
     day_dir.mkdir(parents=True, exist_ok=True)
     digest = build_digest(mode, logs, project, day)
     (day_dir / "DIGEST.md").write_text(digest, encoding="utf-8")
-    print(digest if show else f"Wrote {day_dir / 'DIGEST.md'}")
+    print(digest if show else f"Wrote {short(day_dir / 'DIGEST.md')}")
     if "--html" in args or "--open" in args:
         page = day_dir / "DIGEST.html"
         data = report_data(mode, logs, project, day, day, hide="--redact" in args)
         page.write_text(build_html(data, daily=True), encoding="utf-8")
-        print(f"Wrote {short(page)}")
+        print(f"{'─' * 60}\nHTML page: {short(page)}" if show else f"Wrote {short(page)}")
         if "--open" in args:
+            print("Opening it in your browser…")
             open_file(page)
 
 
@@ -978,6 +1054,86 @@ def cmd_hook(args) -> None:
         return
 
 
+# ---------------------------------------------------------------- update
+
+def cmd_refresh(args) -> None:
+    """Internal: after an update, rewrite this install's rules and helpers with the new text.
+
+    Only touches files that already have Agent Ledger in them, so the user's choices stay.
+    """
+    mode, logs, project = locate()
+    if mode == "global":
+        script = short(logs / "ledger.py")
+        rules = agent_rules(short(logs), script, with_repo=True)
+        rule_files = [Path.home() / ".claude" / "CLAUDE.md", Path.home() / ".codex" / "AGENTS.md"]
+        cmd_file = Path.home() / ".claude" / "commands" / "digest.md"
+        hooks = [(Path.home() / ".claude" / "settings.json",
+                  f'python3 "{(logs / "ledger.py").resolve()}" {HOOK_MARK}')]
+        (logs / "CURSOR_RULE.md").write_text(rules, encoding="utf-8")
+    else:
+        script = f"{PROJECT_DIR_NAME}/ledger.py"
+        rules = agent_rules(PROJECT_DIR_NAME, script, with_repo=False)
+        rule_files = [project / "AGENTS.md", project / "CLAUDE.md"]
+        cmd_file = project / ".claude" / "commands" / "digest.md"
+        command = f'python3 "$CLAUDE_PROJECT_DIR/{PROJECT_DIR_NAME}/ledger.py" {HOOK_MARK}'
+        hooks = [(project / ".claude" / n, command) for n in ("settings.json", "settings.local.json")]
+    for f in rule_files:
+        if has_rules(f):
+            add_rules(f, rules)
+    if cmd_file.exists():
+        cmd_file.write_text(digest_command(script), encoding="utf-8")
+    for settings, command in hooks:
+        if has_claude_hook(settings):
+            install_claude_hook(settings, command)
+
+
+def cmd_update(args) -> None:
+    """Refresh installed copies of ledger.py (and their rules) from a newer copy.
+
+    Run it from the repo or pip install after upgrading (updates every copy it knows about),
+    or from an installed copy (pulls from the copy it was installed from).
+    """
+    me = Path(__file__).resolve()
+    here = me.parent
+    installed = (here / GLOBAL_MARKER).exists() or here.name == PROJECT_DIR_NAME
+
+    if installed:
+        source = recorded_source(here)
+        if not source:
+            sys.exit("This copy doesn't know where it was installed from.\n"
+                     "Run update from your Agent-Ledger folder instead (after `git pull`):\n"
+                     "  python3 /path/to/Agent-Ledger/ledger.py update")
+        targets = [me]
+    else:
+        source = me
+        candidates = registered_installs() + [global_home() / "ledger.py", Path.cwd() / PROJECT_DIR_NAME / "ledger.py"]
+        candidates += [Path(a).expanduser() / PROJECT_DIR_NAME / "ledger.py" for a in args if not a.startswith("-")]
+        targets, seen = [], set()
+        for c in candidates:
+            if c.is_file() and c.resolve() != me and c.resolve() not in seen:
+                seen.add(c.resolve())
+                targets.append(c.resolve())
+
+    if not targets:
+        print("No installed copies found. Set one up with:  python3 ledger.py init")
+        return
+
+    new = version_of(source)
+    print(f"Updating from {short(source)} (version {new})\n")
+    for t in targets:
+        old = version_of(t)
+        if t.read_bytes() == source.read_bytes():
+            print(f"  {short(t):<44} already up to date ({new})")
+            continue
+        shutil.copy2(source, t)
+        (t.parent / SOURCE_MARKER).write_text(str(source) + "\n", encoding="utf-8")
+        register_install(t)
+        refreshed = subprocess.run([sys.executable, str(t), "_refresh"], capture_output=True, text=True)
+        note = "" if refreshed.returncode == 0 else "  (rules not refreshed; run init again)"
+        print(f"  {short(t):<44} {old} → {new}{note}")
+    print("\nDone. Restart open agent sessions so they pick up any rule changes.")
+
+
 # ---------------------------------------------------------------- status
 
 def has_rules(path: Path) -> bool:
@@ -990,9 +1146,15 @@ def cmd_status(args) -> None:
     ok, warn = "✅", "⚠️ "
     problems = []
 
+    check_args(args, value_flags=("--date",), cmd="status")
     print(f"Agent Ledger status — {day}\n")
-    print(f"  Mode:   {mode}")
-    print(f"  Logs:   {short(logs / day)}/")
+    print(f"  Mode:     {mode}")
+    print(f"  Logs:     {short(logs / day)}/")
+    print(f"  Version:  {__version__}")
+    src = recorded_source(Path(__file__).resolve().parent)
+    if src and vtuple(version_of(src)) > vtuple(__version__):
+        print(f"  {warn}A newer version ({version_of(src)}) is available at {short(src)}")
+        print(f"      Run:  python3 {short(Path(__file__).resolve())} update")
 
     # 1. Are the rules where the agents will read them?
     if mode == "project":
@@ -1060,6 +1222,9 @@ def main() -> None:
     if not args or args[0] in ("-h", "--help", "help"):
         print(__doc__)
         return
+    if args[0] in ("--version", "-V", "version"):
+        print(f"agent-ledger {__version__}")
+        return
     cmd, rest = args[0], args[1:]
     if cmd == "init":
         cmd_init(rest)
@@ -1077,8 +1242,13 @@ def main() -> None:
         cmd_report(rest, week=True)
     elif cmd == "hook":
         cmd_hook(rest)
+    elif cmd == "update":
+        cmd_update(rest)
+    elif cmd == "_refresh":
+        cmd_refresh(rest)
     else:
-        sys.exit(f"Unknown command: {cmd}\n{__doc__}")
+        sys.exit(f"Unknown command: {cmd}\nRun `ledger.py --help` to see the commands. "
+                 "(If it's a newer command, your copy may be out of date: run `ledger.py update`.)")
 
 
 if __name__ == "__main__":
