@@ -66,6 +66,8 @@ What `init` does:
 - **Global:** adds the logging rule to your *personal* agent settings (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`) and adds `/digest` to Claude Code. For **Cursor**, paste the rule from `~/agent-ledger/CURSOR_RULE.md` into *Settings → Rules → User Rules*.
 - **Project:** adds the rule to the project's `AGENTS.md` and `CLAUDE.md` and creates `ledger/`. With `--private`, everything Agent Ledger creates is hidden from git on your machine only. (If `AGENTS.md` was already in git, the added rule still shows in `git diff`; use global mode to avoid that.)
 
+- **Both:** in Claude Code, adds a small **log reminder hook**. If Claude changed files but didn't log the work, it's asked to log before it finishes. Skip it with `--no-hook`.
+
 Your existing content is always kept, and running `init` again is safe.
 
 **3. Restart your agents.** Agents read their rules when a session starts, so close and reopen any Claude Code, Codex or Cursor session that was already open.
@@ -85,7 +87,14 @@ Or just ask any agent: *"give me today's digest"*. In Claude Code, type `/digest
 
 ## What an entry looks like
 
-Agents write this. You don't have to.
+Agents log with one command, so the date, time and format are always right:
+
+```bash
+python3 ~/agent-ledger/ledger.py log --agent codex --task "Add onboarding screen with skip flow" \
+  --files "OnboardingScreen.kt, NavGraph.kt" --follow-up "Needs analytics event"
+```
+
+That adds this to today's `codex.md` (the project name comes from the git repo you're in):
 
 ```markdown
 ## 14:32 · Atfal Compass · DONE
@@ -95,7 +104,7 @@ Agents write this. You don't have to.
 - Follow-up: Needs analytics event
 ```
 
-Status is `DONE`, `PARTIAL` or `BLOCKED`. The `Repo:` line is used in global mode so the digest can include that repo's commits.
+Status is `DONE` (default), `PARTIAL` or `BLOCKED`. The `Repo:` line is used in global mode so the digest can include that repo's commits. Agents that can't run commands write the same entry by hand.
 
 ## What the digest looks like
 
@@ -130,6 +139,8 @@ Projects: Atfal Compass, Client App
 | `ledger.py init` | Set up (asks which mode) |
 | `ledger.py init --global` | Global mode |
 | `ledger.py init --project [folder] [--private]` | Project mode |
+| `ledger.py init ... --no-hook` | Set up without the Claude Code log reminder |
+| `ledger.py log --agent NAME --task "..."` | Add an entry (agents run this). Options: `--files`, `--status`, `--follow-up`, `--notes`, `--project` |
 | `ledger.py today` | Build today's digest and print it |
 | `ledger.py compile` | Build today's digest (saves `DIGEST.md`) |
 | `ledger.py compile --date yesterday` | Another day (`yesterday` or `YYYY-MM-DD`) |
@@ -159,7 +170,7 @@ The usual causes:
 
 1. **The session was already open.** Agents read the rules when a session starts. Restart the agent and try again.
 2. **That project isn't set up.** Project mode covers one project only. Run `init --project` in each project, or use `init --global` to cover all of them.
-3. **The agent skipped it.** It happens now and then. Remind it once: *"log what you just did in the ledger"*. The day's git commits still show up in the digest either way.
+3. **The agent skipped it.** It happens now and then. Remind it once: *"log what you just did in the ledger"*. The day's git commits still show up in the digest either way. In Claude Code, the log reminder hook catches this for you; `status` shows whether it's on.
 
 ---
 
