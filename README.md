@@ -130,6 +130,32 @@ Projects: Atfal Compass, Client App
 - `a91c2e4` [client-app] 16:20 docs: add README
 ```
 
+## Reports for any date range
+
+For a weekly review, a client update or an invoice, build a report across several days:
+
+```bash
+python3 ~/agent-ledger/ledger.py week                                    # last 7 days
+python3 ~/agent-ledger/ledger.py report --from 2026-11-01 --to 2026-11-15
+python3 ~/agent-ledger/ledger.py report --from 2026-11-01 --project client-app --redact
+```
+
+The report groups work by project and day, with a summary table, follow-ups and commits. It's saved in `reports/` inside your ledger (add `--print` to also show it, or `--out file.md` to save it elsewhere).
+
+- `--project NAME` / `--agent NAME`: only that project or agent
+- `--redact`: hides emails, API keys and tokens, and home-folder paths. Use it before sending a report to anyone.
+
+## View it as a web page
+
+Add `--html` to any digest or report to also get a clean, formatted page, or `--open` to open it in your browser straight away:
+
+```bash
+python3 ~/agent-ledger/ledger.py today --open                 # today's digest
+python3 ~/agent-ledger/ledger.py week --redact --open         # last 7 days
+```
+
+The page has summary tiles, a status bar, every project's work grouped by day, follow-ups and commits. You can filter by status or search tasks, files and agents. It's a single file with no internet needed, works in light and dark mode, and prints cleanly, so *Print → Save as PDF* gives you a report to attach to an email or invoice.
+
 ---
 
 ## Commands
@@ -144,6 +170,9 @@ Projects: Atfal Compass, Client App
 | `ledger.py today` | Build today's digest and print it |
 | `ledger.py compile` | Build today's digest (saves `DIGEST.md`) |
 | `ledger.py compile --date yesterday` | Another day (`yesterday` or `YYYY-MM-DD`) |
+| `ledger.py today --open` | Today's digest as a web page (`--html` saves it without opening) |
+| `ledger.py week` | Report for the last 7 days |
+| `ledger.py report --from DATE --to DATE` | Report for any date range. Options: `--project`, `--agent`, `--redact`, `--html`, `--open`, `--print`, `--out` |
 | `ledger.py status` | Check the setup and see why nothing was logged |
 
 ## Auto-compile at the end of the day (optional)
