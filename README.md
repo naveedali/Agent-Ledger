@@ -228,6 +228,21 @@ The report groups work by project and day, with a summary table, follow-ups and 
 - `--project NAME` / `--agent NAME`: only that project or agent
 - `--redact`: hides emails, API keys and tokens, and home-folder paths. Use it before sending a report to anyone.
 
+## Clients and time (for freelancers)
+
+Tag work with a client, and get the time spent per client and project, ready for a client update or an invoice.
+
+```bash
+agent-ledger client client-app "Acme Corp"      # link a project to a client once
+agent-ledger report --from 2026-11-01 --client "acme corp" --redact --open
+```
+
+- **Time:** an entry logged with `--time 1h30m` (or `45m`, `1.5h`) uses that. Otherwise the time is **estimated** from the gap since the same agent's previous entry that day, up to 2 hours, and marked with `~`. The first entry of a day gets no estimate.
+- **Clients:** an entry's own `--client` wins; otherwise the project's linked client is used. `agent-ledger client` lists the links; `client PROJECT --remove` drops one.
+- Reports show time per task and a **Time** table (client, project, logged, estimated, total). The HTML view adds a total-time tile.
+
+Estimates are a guide, not a timesheet: when you bill by the hour, log real time with `--time`.
+
 ## View it as a web page
 
 Add `--html` to any digest or report to also get a clean, formatted page, or `--open` to open it in your browser straight away:
@@ -249,14 +264,15 @@ The page has summary tiles, a status bar, every project's work grouped by day, f
 | `ledger.py init --global` | Global mode |
 | `ledger.py init --project [folder] [--private]` | Project mode |
 | `ledger.py init ... --no-hook` | Set up without the Claude Code log reminder |
-| `ledger.py log --agent NAME --task "..."` | Add an entry (agents run this). Options: `--files`, `--status`, `--follow-up`, `--notes`, `--project` |
+| `ledger.py log --agent NAME --task "..."` | Add an entry (agents run this). Options: `--files`, `--status`, `--follow-up`, `--notes`, `--project`, `--client`, `--time` |
 | `ledger.py today` | Build today's digest and print it |
 | `ledger.py compile` | Build today's digest (saves `DIGEST.md`) |
 | `ledger.py compile --date yesterday` | Another day (`yesterday` or `YYYY-MM-DD`) |
 | `ledger.py today --open` | Today's digest as a web page (`--html` saves it without opening) |
 | `ledger.py standup` | Yesterday / Today / Blockers, ready to paste. Options: `--project`, `--agent`, `--redact`, `--date` |
+| `ledger.py client [PROJECT CLIENT]` | Link a project to a client (no arguments: list links) |
 | `ledger.py week` | Report for the last 7 days |
-| `ledger.py report --from DATE --to DATE` | Report for any date range. Options: `--project`, `--agent`, `--redact`, `--html`, `--open`, `--print`, `--out` |
+| `ledger.py report --from DATE --to DATE` | Report for any date range. Options: `--client`, `--project`, `--agent`, `--redact`, `--html`, `--open`, `--print`, `--out` |
 | `ledger.py status` | Check the setup and see why nothing was logged |
 | `ledger.py update` | Refresh installed copies and rules after upgrading |
 | `ledger.py mcp-install` | Add the MCP server to Cursor and Codex (prints the Claude Code command) |

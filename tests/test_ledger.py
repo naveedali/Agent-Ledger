@@ -448,6 +448,49 @@ class TestStandup(LedgerTestCase):
         self.assertIn("None", out)
 
 
+class TestClientTime(LedgerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init", "--global")
+        self.script = self.gl / "ledger.py"
+        (self.gl / TODAY).mkdir(parents=True, exist_ok=True)
+        (self.gl / TODAY / "claude.md").write_text(
+            "## 09:00 · client-app · DONE\n- Task: CI\n\n"
+            "## 10:10 · client-app · DONE\n- Task: Auth\n\n"
+            "## 11:00 · client-app · BLOCKED\n- Task: Payments\n- Time: 45m\n\n"
+            "## 16:00 · client-app · DONE\n- Task: Release fix\n")
+
+    def test_estimates_and_logged_time(self):
+        out = self.run_cli("report", "--from", "today", "--print", script=self.script).stdout
+        self.assertIn("Auth (~1h 10m)", out)            # gap since the previous entry
+        self.assertIn("Payments (45m)", out)            # logged time wins over the estimate
+        self.assertNotIn("Release fix (", out)          # 5h gap is over the cap: no estimate
+        self.assertNotIn("CI (", out)                   # first entry of the day: no estimate
+        self.assertIn("**Total: 1h 55m** (45m logged, 1h 10m estimated)", out)
+
+    def test_client_mapping_and_filter(self):
+        self.run_cli("client", "client-app", "Acme Corp", script=self.script)
+        self.assertIn("Acme Corp", self.run_cli("client", script=self.script).stdout)
+        repo = self.git_repo("other")
+        self.run_cli("log", "--agent", "codex", "--task", "Other work", "--client", "Beta", "--time", "1.5h",
+                     script=self.script, cwd=repo)
+        out = self.run_cli("report", "--from", "today", "--client", "acme corp", "--print", script=self.script).stdout
+        self.assertIn("Client: acme corp", out)
+        self.assertIn("4 tasks", out)
+        self.assertNotIn("Other work", out)
+        out = self.run_cli("report", "--from", "today", "--client", "beta", "--print", "--html",
+                           script=self.script).stdout
+        self.assertIn("Other work (1h 30m)", out)
+        page = next((self.gl / "reports").glob("*_beta.html")).read_text()
+        self.assertIn("1h 30m", page)
+        self.run_cli("client", "client-app", "--remove", script=self.script)
+        self.assertIn("No clients yet", self.run_cli("client", script=self.script).stdout)
+
+    def test_bad_time_is_rejected(self):
+        r = self.run_cli("log", "--agent", "x", "--task", "y", "--time", "soon", script=self.script, ok=False)
+        self.assertIn("can't read time", r.stderr)
+
+
 class TestUnits(unittest.TestCase):
     def test_redact(self):
         r = ledger.redact
@@ -468,6 +511,12 @@ class TestUnits(unittest.TestCase):
             self.assertEqual(e[1]["task"], "free heading")
         finally:
             shutil.rmtree(tmp)
+
+    def test_time_parsing(self):
+        p = ledger.parse_minutes
+        self.assertEqual([p("45"), p("45m"), p("1h30m"), p("1h 30m"), p("1.5h"), p("2 hours"), p("soon")],
+                         [45, 45, 90, 90, 90, 120, None])
+        self.assertEqual(ledger.fmt_minutes(95), "1h 35m")
 
     def test_versions(self):
         self.assertGreater(ledger.vtuple("0.10.0"), ledger.vtuple("0.9.9"))
