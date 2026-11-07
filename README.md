@@ -42,21 +42,27 @@ Global mode                          Project mode
 **1. Get it**
 
 ```bash
+pipx install agent-ledger-cli      # or: pip install agent-ledger-cli
+```
+
+That gives you the `agent-ledger` command. Prefer no install? Clone the repo and use `python3 Agent-Ledger/ledger.py` wherever this README says `agent-ledger`:
+
+```bash
 git clone https://github.com/naveedali/Agent-Ledger.git
 ```
 
 **2. Set it up**
 
 ```bash
-python3 Agent-Ledger/ledger.py init
+agent-ledger init
 ```
 
 It asks which mode you want. Or skip the question:
 
 ```bash
-python3 Agent-Ledger/ledger.py init --global                            # one ledger for everything
-python3 Agent-Ledger/ledger.py init --project path/to/project           # ledger inside a project
-python3 Agent-Ledger/ledger.py init --project path/to/project --private # same, hidden from git
+agent-ledger init --global                            # one ledger for everything
+agent-ledger init --project path/to/project           # ledger inside a project
+agent-ledger init --project path/to/project --private # same, hidden from git
 ```
 
 > 💡 In project mode, point `--project` at **the project your agents work in**, not the Agent-Ledger folder. `.` means the folder you're in right now.
@@ -174,6 +180,22 @@ The page has summary tiles, a status bar, every project's work grouped by day, f
 | `ledger.py week` | Report for the last 7 days |
 | `ledger.py report --from DATE --to DATE` | Report for any date range. Options: `--project`, `--agent`, `--redact`, `--html`, `--open`, `--print`, `--out` |
 | `ledger.py status` | Check the setup and see why nothing was logged |
+| `ledger.py update` | Refresh installed copies and rules after upgrading |
+| `ledger.py --version` | Show the version |
+
+## Updating
+
+`init` puts a copy of `ledger.py` in your ledger (`~/agent-ledger/` or a project's `ledger/`), so pulling new code doesn't change those copies. After you upgrade, refresh them in one step:
+
+```bash
+pipx upgrade agent-ledger-cli                # if you installed with pipx
+agent-ledger update                          # updates every copy it knows about
+agent-ledger update path/to/project          # or name a project explicitly
+```
+
+Using a clone instead? `git pull`, then `python3 ledger.py update`.
+
+`update` also refreshes the agent rules, the `/digest` command and the Claude Code hook, and keeps your logs and settings. `status` tells you when your copy is out of date, and `ledger.py --version` shows which version you're running.
 
 ## Auto-compile at the end of the day (optional)
 
@@ -204,6 +226,9 @@ The usual causes:
 ---
 
 ## FAQ
+
+**It says "Unknown command" for a command in this README.**
+You're running an older copy. Run `agent-ledger update` (after `pipx upgrade agent-ledger-cli`), or `python3 ledger.py update` from your clone after `git pull`.
 
 **Can I change where the global ledger lives?**
 Yes. Set `AGENT_LEDGER_HOME` (for example to a synced folder) before running `init --global`.

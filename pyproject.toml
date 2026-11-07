@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-ledger-cli"
+dynamic = ["version"]
+description = "One daily log for all your AI coding agents: Claude Code, Codex, Cursor and any agent that reads AGENTS.md."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Naveed Ali" }]
+requires-python = ">=3.8"
+dependencies = []
+keywords = ["ai", "agents", "claude-code", "codex", "cursor", "worklog", "standup", "developer-tools", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/naveedali/Agent-Ledger"
+Repository = "https://github.com/naveedali/Agent-Ledger"
+Issues = "https://github.com/naveedali/Agent-Ledger/issues"
+
+[project.scripts]
+agent-ledger = "ledger:main"
+
+[tool.setuptools]
+py-modules = ["ledger"]
+
+[tool.setuptools.dynamic]
+version = { attr = "ledger.__version__" }

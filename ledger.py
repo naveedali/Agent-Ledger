@@ -22,7 +22,8 @@ Usage:
   python3 ledger.py update                  Refresh installed copies after you upgrade
   python3 ledger.py --version               Show the version
 
-DATE is YYYY-MM-DD, 'today' or 'yesterday'. No dependencies. Python 3.8+.
+DATE is YYYY-MM-DD, 'today' or 'yesterday'.
+Installed with pipx or pip? Type `agent-ledger` instead of `python3 ledger.py`. No dependencies. Python 3.8+.
 """
 
 import datetime as dt
