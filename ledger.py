@@ -12,11 +12,13 @@ Usage:
         add --html to also save DIGEST.html, --open to open it in your browser
   python3 ledger.py status                  Check the setup / why nothing was logged
   python3 ledger.py log --agent NAME --task "..." [--files ...] [--status PARTIAL|BLOCKED]
+                        [--client NAME] [--time 1h30m]
                                             Add an entry to today's log (used by agents)
   python3 ledger.py report [--from DATE] [--to DATE] [--project NAME] [--agent NAME] [--redact]
                                             Work report for a date range (default: last 7 days)
   python3 ledger.py standup [--project NAME] [--agent NAME] [--redact]
                                             Yesterday / Today / Blockers, ready to paste
+  python3 ledger.py client [PROJECT CLIENT]  Link a project to a client (no args: list them)
   python3 ledger.py week [--project NAME] [--redact]
                                             Report for the last 7 days
         reports also take --html (formatted page) and --open (open it in your browser)
@@ -53,7 +55,8 @@ MARK_END = "<!-- agent-ledger:end -->"
 STATUSES = ("DONE", "PARTIAL", "BLOCKED")
 
 HEADING_RE = re.compile(r"^##\s+(\d{1,2}:\d{2})\s*[·\-|]\s*(.*?)\s*[·\-|]\s*([A-Za-z]+)\s*$")
-FIELD_RE = re.compile(r"^-\s*(Task|Files|Notes|Follow-up|Repo)\s*:\s*(.*)$", re.IGNORECASE)
+FIELD_RE = re.compile(r"^-\s*(Task|Files|Notes|Follow-up|Repo|Client|Time)\s*:\s*(.*)$", re.IGNORECASE)
+GAP_CAP_MIN = 120          # an estimated task never counts for more than this
 
 
 def global_home() -> Path:
@@ -407,7 +410,7 @@ def parse_log(path: Path):
     """Read one agent's log file into a list of entries."""
     agent = path.stem
     entries, current = [], None
-    blank = {"task": "", "files": "", "notes": "", "follow-up": "", "repo": ""}
+    blank = {"task": "", "files": "", "notes": "", "follow-up": "", "repo": "", "client": "", "time_spent": ""}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         m = HEADING_RE.match(line)
@@ -425,7 +428,8 @@ def parse_log(path: Path):
             continue
         f = FIELD_RE.match(line)
         if f and current is not None:
-            current[f.group(1).lower()] = f.group(2).strip()
+            key = f.group(1).lower()
+            current["time_spent" if key == "time" else key] = f.group(2).strip()
     for e in entries:
         if not e["task"]:
             e["task"] = e["notes"] or "(no description)"
@@ -595,7 +599,55 @@ def redact(text: str) -> str:
     return text
 
 
-def collect(logs: Path, since: str, until: str, project_filter=None, agent_filter=None):
+def parse_minutes(text):
+    """'90', '90m', '1h30m', '1h 30m', '1.5h' -> minutes, or None."""
+    m = re.fullmatch(r"\s*(?:(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?)?\s*(?:(\d+)\s*m(?:in(?:utes?)?)?)?\s*", str(text or ""))
+    if m and (m.group(1) or m.group(2)):
+        return int(round(float(m.group(1) or 0) * 60)) + int(m.group(2) or 0)
+    if re.fullmatch(r"\s*\d+\s*", str(text or "")):
+        return int(text)
+    return None
+
+
+def fmt_minutes(m):
+    if m is None:
+        return ""
+    h, mm = divmod(int(round(m)), 60)
+    return f"{h}h {mm:02d}m" if h else f"{mm}m"
+
+
+def clients_file(logs: Path) -> Path:
+    return logs / "clients.json"
+
+
+def client_map(logs: Path) -> dict:
+    try:
+        data = json.loads(clients_file(logs).read_text(encoding="utf-8"))
+        return {str(k).lower(): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def add_time_and_clients(entries, logs: Path):
+    """Each entry gets client (its own tag, else the project's client) and minutes:
+    the logged time, else the gap since the same agent's previous entry that day (capped)."""
+    clients = client_map(logs)
+    last = {}
+    for e in sorted(entries, key=lambda e: (e["day"], e["agent"], e["time"])):
+        e["client"] = e.get("client") or clients.get(e["project"].lower(), "")
+        logged = parse_minutes(e.get("time_spent"))
+        e["minutes"], e["estimated"] = (logged, False) if logged is not None else (None, False)
+        key = (e["day"], e["agent"])
+        if e["time"] != "--:--":
+            h, m = map(int, e["time"].split(":"))
+            now = h * 60 + m
+            if e["minutes"] is None and key in last and 0 < now - last[key] <= GAP_CAP_MIN:
+                e["minutes"], e["estimated"] = now - last[key], True
+            last[key] = now
+    return entries
+
+
+def collect(logs: Path, since: str, until: str, project_filter=None, agent_filter=None, client_filter=None):
     """All entries between two days (inclusive), oldest first, each tagged with its day."""
     start, end = dt.date.fromisoformat(since), dt.date.fromisoformat(until)
     entries, day = [], start
@@ -609,6 +661,9 @@ def collect(logs: Path, since: str, until: str, project_filter=None, agent_filte
                     e["day"] = str(day)
                     entries.append(e)
         day += dt.timedelta(days=1)
+    add_time_and_clients(entries, logs)
+    if client_filter:
+        entries = [e for e in entries if e["client"].lower() == client_filter.lower()]
     if project_filter:
         entries = [e for e in entries if e["project"].lower() == project_filter.lower()]
     if agent_filter:
@@ -616,31 +671,52 @@ def collect(logs: Path, since: str, until: str, project_filter=None, agent_filte
     return sorted(entries, key=lambda e: (e["day"], e["time"]))
 
 
-def report_data(mode, logs, project, since, until, project_filter=None, agent_filter=None, hide=False):
+def report_data(mode, logs, project, since, until, project_filter=None, agent_filter=None, hide=False,
+                client_filter=None):
     """Everything a report needs, already filtered and (optionally) redacted."""
-    entries = collect(logs, since, until, project_filter, agent_filter)
+    entries = collect(logs, since, until, project_filter, agent_filter, client_filter)
     commits = commits_for(mode, project, entries, since, until)
-    if mode == "global" and project_filter:
+    if mode == "global" and (project_filter or client_filter):
         repos = {Path(e["repo"]).expanduser().name for e in entries if e.get("repo")}
         commits = [c for c in commits if c["repo"] in repos]
     if agent_filter:
         commits = []                       # commits can't be tied to one agent
     if hide:
         for e in entries:
-            for k in ("task", "files", "notes", "follow-up", "project"):
+            for k in ("task", "files", "notes", "follow-up", "project", "client"):
                 e[k] = redact(e[k])
         for c in commits:
             c["msg"] = redact(c["msg"])
     return {
         "mode": mode, "since": since, "until": until, "hide": hide,
-        "project_filter": project_filter, "agent_filter": agent_filter,
-        "entries": entries, "commits": commits,
+        "project_filter": project_filter, "agent_filter": agent_filter, "client_filter": client_filter,
+        "entries": entries, "commits": commits, "time": time_summary(entries),
         "count": {s_: sum(e["status"] == s_ for e in entries) for s_ in STATUSES},
         "projects": sorted({e["project"] for e in entries}, key=str.lower),
         "agents": sorted({e["agent"] for e in entries}),
         "days": sorted({e["day"] for e in entries}),
         "generated": f"{dt.datetime.now():%Y-%m-%d %H:%M}",
     }
+
+
+def time_summary(entries):
+    """Logged and estimated minutes, per (client, project) and in total."""
+    rows = {}
+    for e in entries:
+        if e.get("minutes") is None:
+            continue
+        r = rows.setdefault((e.get("client", ""), e["project"]), {"tasks": 0, "logged": 0, "estimated": 0})
+        r["tasks"] += 1
+        r["estimated" if e["estimated"] else "logged"] += e["minutes"]
+    total = {"logged": sum(r["logged"] for r in rows.values()),
+             "estimated": sum(r["estimated"] for r in rows.values())}
+    return {"rows": sorted(rows.items(), key=lambda kv: (kv[0][0].lower(), kv[0][1].lower())), "total": total}
+
+
+def time_label(e):
+    if e.get("minutes") is None:
+        return ""
+    return ("~" if e["estimated"] else "") + fmt_minutes(e["minutes"])
 
 
 def plural(n, word):
@@ -651,14 +727,16 @@ def nice_day(day):
     return dt.date.fromisoformat(day).strftime("%a %d %b %Y")
 
 
-def build_report(mode, logs, project, since, until, project_filter=None, agent_filter=None, hide=False):
-    d = report_data(mode, logs, project, since, until, project_filter, agent_filter, hide)
+def build_report(mode, logs, project, since, until, project_filter=None, agent_filter=None, hide=False,
+                 client_filter=None):
+    d = report_data(mode, logs, project, since, until, project_filter, agent_filter, hide, client_filter)
     entries, commits, count = d["entries"], d["commits"], d["count"]
     icon = {"DONE": "✅", "PARTIAL": "🟡", "BLOCKED": "🔴"}
 
     title = f"Work Report — {since} → {until}" if since != until else f"Work Report — {since}"
     out = [f"# {title}", ""]
-    scope = [f"Project: {project_filter}" if project_filter else "",
+    scope = [f"Client: {client_filter}" if client_filter else "",
+             f"Project: {project_filter}" if project_filter else "",
              f"Agent: {agent_filter}" if agent_filter else ""]
     if any(scope):
         out += ["_" + " · ".join(x for x in scope if x) + "_", ""]
@@ -687,8 +765,22 @@ def build_report(mode, logs, project, since, until, project_filter=None, agent_f
             out += [f"### {nice_day(day)}", ""]
             for e in (e for e in pe if e["day"] == day):
                 files = f"  \n  `{e['files']}`" if e["files"] else ""
-                out.append(f"- {icon[e['status']]} **{e['time']}** · _{e['agent']}_ — {e['task']}{files}")
+                spent = f" ({time_label(e)})" if time_label(e) else ""
+                out.append(f"- {icon[e['status']]} **{e['time']}** · _{e['agent']}_ — {e['task']}{spent}{files}")
             out.append("")
+
+    t = d["time"]
+    if t["rows"]:
+        out += ["## ⏱️ Time", "", "| Client | Project | Tasks | Logged | Estimated | Total |",
+                "|---|---|---:|---:|---:|---:|"]
+        for (client, proj), r in t["rows"]:
+            out.append(f"| {client or '—'} | {proj} | {r['tasks']} | {fmt_minutes(r['logged']) if r['logged'] else '—'} | "
+                       f"{fmt_minutes(r['estimated']) if r['estimated'] else '—'} | **{fmt_minutes(r['logged'] + r['estimated'])}** |")
+        tot = t["total"]
+        out += ["", f"**Total: {fmt_minutes(tot['logged'] + tot['estimated'])}** "
+                    f"({fmt_minutes(tot['logged']) or '0m'} logged, {fmt_minutes(tot['estimated']) or '0m'} estimated)  ",
+                "_Estimated = time since the same agent's previous entry that day, up to 2h. "
+                "Log exact time with `--time`._", ""]
 
     follow = [e for e in entries if e["follow-up"]]
     if follow:
@@ -717,6 +809,7 @@ def cmd_report(args, week=False) -> None:
         ap.add_argument("--to", dest="until", default="today", help="last day (default: today)")
     ap.add_argument("--project", help="only this project")
     ap.add_argument("--agent", help="only this agent")
+    ap.add_argument("--client", help="only this client")
     ap.add_argument("--redact", action="store_true", help="hide emails, keys and home paths")
     ap.add_argument("--out", help="output file (default: <ledger>/reports/...)")
     ap.add_argument("--print", dest="show", action="store_true", help="also print the report")
@@ -731,12 +824,12 @@ def cmd_report(args, week=False) -> None:
         sys.exit(f"--from ({since}) is after --to ({until})")
 
     mode, logs, project = locate()
-    report = build_report(mode, logs, project, since, until, a.project, a.agent, a.redact)
+    report = build_report(mode, logs, project, since, until, a.project, a.agent, a.redact, a.client)
     if a.out:
         out = Path(a.out).expanduser()
     else:
         slug = "".join(f"_{re.sub(r'[^A-Za-z0-9-]+', '-', x).strip('-').lower()}"
-                       for x in (a.project, a.agent) if x)
+                       for x in (a.client, a.project, a.agent) if x)
         out = logs / "reports" / f"report_{since}_to_{until}{slug}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")
@@ -744,12 +837,37 @@ def cmd_report(args, week=False) -> None:
         print(report)
     print(f"Wrote {short(out)}")
     if a.html or a.open:
-        data = report_data(mode, logs, project, since, until, a.project, a.agent, a.redact)
+        data = report_data(mode, logs, project, since, until, a.project, a.agent, a.redact, a.client)
         page = out.with_suffix(".html")
         page.write_text(build_html(data), encoding="utf-8")
         print(f"Wrote {short(page)}")
         if a.open:
             open_file(page)
+
+
+# ---------------------------------------------------------------- clients
+
+def cmd_client(args) -> None:
+    check_args(args, flags=("--remove",), positional=2, cmd="client")
+    mode, logs, project = locate()
+    data = client_map(logs)
+    names = [a for a in args if not a.startswith("-")]
+    if not names:
+        if not data:
+            print("No clients yet. Link one with:  ledger.py client PROJECT CLIENT")
+        for proj, client in sorted(data.items()):
+            print(f"  {proj:<28} → {client}")
+        return
+    proj = names[0].lower()
+    if "--remove" in args:
+        data.pop(proj, None)
+        print(f"{names[0]} is no longer linked to a client.")
+    elif len(names) == 2:
+        data[proj] = names[1]
+        print(f"{names[0]} → {names[1]}. Reports can now use --client {names[1]}.")
+    else:
+        sys.exit("Usage: ledger.py client PROJECT CLIENT   (or: client PROJECT --remove)")
+    clients_file(logs).write_text(json.dumps(data, indent=1, sort_keys=True) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------- standup
@@ -916,7 +1034,8 @@ def build_html(d, title=None, daily=False) -> str:
          f"<title>{esc(title)}</title><style>{HTML_CSS}</style></head><body><div class='wrap'>",
          f"<div class='brand'>{ICON_SVG}Agent Ledger</div>",
          f"<h1>{heading}</h1><p class='sub'>{esc(period)}</p><div class='chips'>"]
-    for label, val in (("Project", d["project_filter"]), ("Agent", d["agent_filter"])):
+    for label, val in (("Client", d.get("client_filter")), ("Project", d["project_filter"]),
+                       ("Agent", d["agent_filter"])):
         if val:
             h.append(f"<span class='chip'>{label}: {esc(val)}</span>")
     if d["agents"]:
@@ -931,6 +1050,10 @@ def build_html(d, title=None, daily=False) -> str:
     tiles = [("Tasks", len(entries), None), ("Done", count["DONE"], "var(--good)"),
              ("Partial", count["PARTIAL"], "var(--warn)"), ("Blocked", count["BLOCKED"], "var(--crit)"),
              ("Commits", len(commits), None)] + ([] if daily else [("Active days", len(d["days"]), None)])
+    tt = d["time"]["total"]
+    if tt["logged"] + tt["estimated"]:
+        tiles.append(("Time" + (" (est.)" if tt["estimated"] and not tt["logged"] else ""),
+                      fmt_minutes(tt["logged"] + tt["estimated"]), None))
     h.append("<div class='tiles'>")
     for label, n, color in tiles:
         dot = f"<span class='dot' style='background:{color}'></span>" if color else ""
@@ -986,9 +1109,24 @@ def build_html(d, title=None, daily=False) -> str:
                         extra += f"<div class='note'>{lab}: {esc(e[k])}</div>"
                 h.append(f"<li class='e {e['status']}'><span class='pill'>{STATUS_UI[e['status']][2]}{STATUS_UI[e['status']][0]}</span>"
                          f"<span class='t'>{esc(e['time'])}</span><div><span class='task'>{esc(e['task'])}</span>"
-                         f"<span class='agent'>{esc(e['agent'])}</span>{extra}</div></li>")
+                         + (f"<span class='agent' title='{'estimated' if e['estimated'] else 'logged'} time'>"
+                            f"{esc(time_label(e))}</span>" if time_label(e) else "")
+                         + f"<span class='agent'>{esc(e['agent'])}</span>{extra}</div></li>")
             h.append("</ul></div>")
         h.append("</section>")
+
+    if d["time"]["rows"]:
+        tt = d["time"]["total"]
+        h.append(f"<section><h2>Time<small>{fmt_minutes(tt['logged'] + tt['estimated'])} total</small></h2>"
+                 "<div class='tbl'><table><tr><th>Client</th><th>Project</th><th class='num'>Tasks</th>"
+                 "<th class='num'>Logged</th><th class='num'>Estimated</th><th class='num'>Total</th></tr>")
+        for (client, proj), r in d["time"]["rows"]:
+            h.append(f"<tr><td>{esc(client) or '—'}</td><td>{esc(proj)}</td><td class='num'>{r['tasks']}</td>"
+                     f"<td class='num'>{fmt_minutes(r['logged']) if r['logged'] else '—'}</td>"
+                     f"<td class='num'>{fmt_minutes(r['estimated']) if r['estimated'] else '—'}</td>"
+                     f"<td class='num'><b>{fmt_minutes(r['logged'] + r['estimated'])}</b></td></tr>")
+        h.append("</table></div><p class='note'>Estimated time is the gap since the same agent's previous "
+                 "entry that day, up to 2 hours. Log exact time with <code>--time</code>.</p></section>")
 
     follow = [e for e in entries if e["follow-up"]]
     if follow:
@@ -1033,7 +1171,7 @@ def one_line(s: str) -> str:
 
 
 def add_entry(agent, task, status="DONE", files="", project_name=None, notes="", follow_up="", repo=None,
-              when=None):
+              when=None, client="", time_spent=""):
     """Append one entry to the log for `agent` (today, or the day of `when`). Returns the file's path."""
     mode, logs, project = locate()
     now = when or dt.datetime.now()
@@ -1042,6 +1180,9 @@ def add_entry(agent, task, status="DONE", files="", project_name=None, notes="",
         raise ValueError(f"status must be one of {', '.join(STATUSES)}")
     if not one_line(task):
         raise ValueError("task can't be empty")
+    minutes = parse_minutes(time_spent) if time_spent else None
+    if time_spent and minutes is None:
+        raise ValueError(f"can't read time '{time_spent}' (try 45m, 1h30m or 1.5h)")
     repo = Path(repo).expanduser().resolve() if repo else git_root(Path.cwd())
     name = project_name or (repo.name if repo else (project.name if project else Path.cwd().name))
     agent = re.sub(r"[^a-z0-9_-]", "", str(agent).lower()) or "agent"
@@ -1051,6 +1192,10 @@ def add_entry(agent, task, status="DONE", files="", project_name=None, notes="",
         lines.append(f"- Files: {one_line(files)}")
     if mode == "global" and repo:
         lines.append(f"- Repo: {short(repo)}")
+    if client:
+        lines.append(f"- Client: {one_line(client)}")
+    if minutes is not None:
+        lines.append(f"- Time: {fmt_minutes(minutes)}")
     if notes:
         lines.append(f"- Notes: {one_line(notes)}")
     if follow_up:
@@ -1075,9 +1220,12 @@ def cmd_log(args) -> None:
     ap.add_argument("--notes", default="")
     ap.add_argument("--follow-up", dest="follow_up", default="", help="what's left to do")
     ap.add_argument("--repo", help="repo path (default: the git repo you're in)")
+    ap.add_argument("--client", default="", help="client this work is for")
+    ap.add_argument("--time", default="", help="time spent, e.g. 45m, 1h30m, 1.5h")
     a = ap.parse_args(args)
     try:
-        path = add_entry(a.agent, a.task, a.status, a.files, a.project, a.notes, a.follow_up, a.repo)
+        path = add_entry(a.agent, a.task, a.status, a.files, a.project, a.notes, a.follow_up, a.repo,
+                         client=a.client, time_spent=a.time)
     except ValueError as e:
         sys.exit(str(e))
     print(f"Logged to {short(path)}")
@@ -1420,7 +1568,9 @@ MCP_TOOLS = [
          "follow_up": {"type": "string", "description": "What's left to do, if anything"},
          "notes": {"type": "string", "description": "Optional one-line note"},
          "project": {"type": "string", "description": "Project name (default: the git repo's name)"},
-         "repo": {"type": "string", "description": "Absolute path of the git repo you worked in"}}}},
+         "repo": {"type": "string", "description": "Absolute path of the git repo you worked in"},
+         "client": {"type": "string", "description": "Client this work is for, if any"},
+         "time": {"type": "string", "description": "Time spent, if known: 45m, 1h30m, 1.5h"}}}},
     {"name": "daily_digest",
      "description": "The Agent Ledger digest for one day: tasks done, partial or blocked, follow-ups "
                     "and git commits. Use it when the user asks what was done today.",
@@ -1432,6 +1582,7 @@ MCP_TOOLS = [
          "from": _DATE, "to": _DATE,
          "project": {"type": "string", "description": "Only this project"},
          "agent": {"type": "string", "description": "Only this agent"},
+         "client": {"type": "string", "description": "Only this client"},
          "redact": {"type": "boolean", "description": "Hide emails, keys and home paths", "default": False}}}},
     {"name": "standup",
      "description": "A standup update from the Agent Ledger: what was done on the last working day, "
@@ -1452,7 +1603,8 @@ def mcp_call(name: str, a: dict) -> str:
     mode, logs, project = locate()
     if name == "log_work":
         path = add_entry(a.get("agent", ""), a.get("task", ""), a.get("status") or "DONE", a.get("files", ""),
-                         a.get("project"), a.get("notes", ""), a.get("follow_up", ""), a.get("repo"))
+                         a.get("project"), a.get("notes", ""), a.get("follow_up", ""), a.get("repo"),
+                         client=a.get("client", ""), time_spent=a.get("time", ""))
         return f"Logged to {short(path)}"
     if name == "daily_digest":
         return build_digest(mode, logs, project, to_day(a.get("date") or "today"))
@@ -1460,7 +1612,7 @@ def mcp_call(name: str, a: dict) -> str:
         until = to_day(a.get("to") or "today")
         since = to_day(a["from"]) if a.get("from") else str(dt.date.fromisoformat(until) - dt.timedelta(days=6))
         return build_report(mode, logs, project, since, until, a.get("project"), a.get("agent"),
-                            bool(a.get("redact")))
+                            bool(a.get("redact")), a.get("client"))
     if name == "standup":
         return build_standup(mode, logs, project, to_day(a.get("date") or "today"), a.get("project"),
                              a.get("agent"), bool(a.get("redact")))
@@ -1754,6 +1906,8 @@ def main() -> None:
         cmd_report(rest, week=True)
     elif cmd == "standup":
         cmd_standup(rest)
+    elif cmd == "client":
+        cmd_client(rest)
     elif cmd == "hook":
         cmd_hook(rest)
     elif cmd == "update":
