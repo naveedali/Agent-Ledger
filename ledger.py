@@ -20,6 +20,8 @@ Usage:
         reports also take --html (formatted page) and --open (open it in your browser)
 
   python3 ledger.py update                  Refresh installed copies after you upgrade
+  python3 ledger.py mcp                     Run as an MCP server (agents log through MCP tools)
+  python3 ledger.py mcp-install             Add the MCP server to Cursor and Codex
   python3 ledger.py --version               Show the version
 
 DATE is YYYY-MM-DD, 'today' or 'yesterday'.
@@ -35,7 +37,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 PROJECT_DIR_NAME = "ledger"
 GLOBAL_MARKER = ".agent-ledger-global"
@@ -67,6 +69,7 @@ After you finish any task, log it with ONE command:
 - Optional: `--status PARTIAL` or `--status BLOCKED`, `--follow-up "<what's left>"`,
   `--notes "<one line>"`, `--project "<name>"` (defaults to the git repo name).
 - Keep it short: outcomes, not a play-by-play.
+- If you have the Agent Ledger MCP tool `log_work`, you can call it instead (same fields).
 
 If you can't run commands, add the entry by hand to the END of
 `{log_dir}/<YYYY-MM-DD>/<agent>.md` (today's local date; create it if missing):
@@ -963,6 +966,37 @@ def one_line(s: str) -> str:
     return " ".join(str(s).split())
 
 
+def add_entry(agent, task, status="DONE", files="", project_name=None, notes="", follow_up="", repo=None):
+    """Append one entry to today's log for `agent`. Returns the log file's path."""
+    mode, logs, project = locate()
+    now = dt.datetime.now()
+    status = str(status or "DONE").upper()
+    if status not in STATUSES:
+        raise ValueError(f"status must be one of {', '.join(STATUSES)}")
+    if not one_line(task):
+        raise ValueError("task can't be empty")
+    repo = Path(repo).expanduser().resolve() if repo else git_root(Path.cwd())
+    name = project_name or (repo.name if repo else (project.name if project else Path.cwd().name))
+    agent = re.sub(r"[^a-z0-9_-]", "", str(agent).lower()) or "agent"
+
+    lines = [f"## {now:%H:%M} · {one_line(name)} · {status}", f"- Task: {one_line(task)}"]
+    if files:
+        lines.append(f"- Files: {one_line(files)}")
+    if mode == "global" and repo:
+        lines.append(f"- Repo: {short(repo)}")
+    if notes:
+        lines.append(f"- Notes: {one_line(notes)}")
+    if follow_up:
+        lines.append(f"- Follow-up: {one_line(follow_up)}")
+
+    path = logs / f"{now:%Y-%m-%d}" / f"{agent}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gap = "\n" if path.exists() and path.stat().st_size else ""
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(gap + "\n".join(lines) + "\n")
+    return path
+
+
 def cmd_log(args) -> None:
     import argparse
     ap = argparse.ArgumentParser(prog="ledger.py log", description="Add one entry to today's log.")
@@ -975,28 +1009,10 @@ def cmd_log(args) -> None:
     ap.add_argument("--follow-up", dest="follow_up", default="", help="what's left to do")
     ap.add_argument("--repo", help="repo path (default: the git repo you're in)")
     a = ap.parse_args(args)
-
-    mode, logs, project = locate()
-    now = dt.datetime.now()
-    repo = Path(a.repo).expanduser().resolve() if a.repo else git_root(Path.cwd())
-    name = a.project or (repo.name if repo else (project.name if project else Path.cwd().name))
-    agent = re.sub(r"[^a-z0-9_-]", "", a.agent.lower()) or "agent"
-
-    lines = [f"## {now:%H:%M} · {one_line(name)} · {a.status}", f"- Task: {one_line(a.task)}"]
-    if a.files:
-        lines.append(f"- Files: {one_line(a.files)}")
-    if mode == "global" and repo:
-        lines.append(f"- Repo: {short(repo)}")
-    if a.notes:
-        lines.append(f"- Notes: {one_line(a.notes)}")
-    if a.follow_up:
-        lines.append(f"- Follow-up: {one_line(a.follow_up)}")
-
-    path = logs / f"{now:%Y-%m-%d}" / f"{agent}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    gap = "\n" if path.exists() and path.stat().st_size else ""
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(gap + "\n".join(lines) + "\n")
+    try:
+        path = add_entry(a.agent, a.task, a.status, a.files, a.project, a.notes, a.follow_up, a.repo)
+    except ValueError as e:
+        sys.exit(str(e))
     print(f"Logged to {short(path)}")
 
 
@@ -1053,6 +1069,153 @@ def cmd_hook(args) -> None:
                 "If you're still mid-task, just continue.")}))
     except (Exception, SystemExit):
         return
+
+
+# ---------------------------------------------------------------- MCP server
+
+MCP_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
+_DATE = {"type": "string", "description": "YYYY-MM-DD, 'today' or 'yesterday'"}
+MCP_TOOLS = [
+    {"name": "log_work",
+     "description": "Record a task in today's Agent Ledger work log. Call this after you finish any "
+                    "task (or when it's blocked or only partly done). Keep it to one line: the outcome.",
+     "inputSchema": {"type": "object", "required": ["agent", "task"], "properties": {
+         "agent": {"type": "string", "description": "Your name in lowercase: claude, codex, cursor, gemini, ..."},
+         "task": {"type": "string", "description": "One line: what was done"},
+         "status": {"type": "string", "enum": list(STATUSES), "default": "DONE"},
+         "files": {"type": "string", "description": "Main files touched, comma separated"},
+         "follow_up": {"type": "string", "description": "What's left to do, if anything"},
+         "notes": {"type": "string", "description": "Optional one-line note"},
+         "project": {"type": "string", "description": "Project name (default: the git repo's name)"},
+         "repo": {"type": "string", "description": "Absolute path of the git repo you worked in"}}}},
+    {"name": "daily_digest",
+     "description": "The Agent Ledger digest for one day: tasks done, partial or blocked, follow-ups "
+                    "and git commits. Use it when the user asks what was done today.",
+     "inputSchema": {"type": "object", "properties": {"date": _DATE}}},
+    {"name": "work_report",
+     "description": "An Agent Ledger work report for a date range (default: the last 7 days), "
+                    "grouped by project and day.",
+     "inputSchema": {"type": "object", "properties": {
+         "from": _DATE, "to": _DATE,
+         "project": {"type": "string", "description": "Only this project"},
+         "agent": {"type": "string", "description": "Only this agent"},
+         "redact": {"type": "boolean", "description": "Hide emails, keys and home paths", "default": False}}}},
+    {"name": "ledger_status",
+     "description": "Check the Agent Ledger setup: where logs go, which agent rules are in place, "
+                    "and who has logged today.",
+     "inputSchema": {"type": "object", "properties": {}}},
+]
+
+
+def mcp_call(name: str, a: dict) -> str:
+    import contextlib
+    import io
+    mode, logs, project = locate()
+    if name == "log_work":
+        path = add_entry(a.get("agent", ""), a.get("task", ""), a.get("status") or "DONE", a.get("files", ""),
+                         a.get("project"), a.get("notes", ""), a.get("follow_up", ""), a.get("repo"))
+        return f"Logged to {short(path)}"
+    if name == "daily_digest":
+        return build_digest(mode, logs, project, to_day(a.get("date") or "today"))
+    if name == "work_report":
+        until = to_day(a.get("to") or "today")
+        since = to_day(a["from"]) if a.get("from") else str(dt.date.fromisoformat(until) - dt.timedelta(days=6))
+        return build_report(mode, logs, project, since, until, a.get("project"), a.get("agent"),
+                            bool(a.get("redact")))
+    if name == "ledger_status":
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_status([])
+        return buf.getvalue()
+    raise KeyError(name)
+
+
+def cmd_mcp(args) -> None:
+    """A tiny MCP server over stdio (newline-delimited JSON-RPC 2.0). No dependencies."""
+    out = sys.stdout
+
+    def send(msg):
+        out.write(json.dumps(msg) + "\n")
+        out.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except ValueError:
+            send({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
+            continue
+        if not isinstance(req, dict) or "id" not in req:
+            continue                                   # notifications need no reply
+        rid, method, params = req["id"], req.get("method"), req.get("params") or {}
+        try:
+            if method == "initialize":
+                asked = params.get("protocolVersion")
+                result = {"protocolVersion": asked if asked in MCP_PROTOCOLS else MCP_PROTOCOLS[0],
+                          "capabilities": {"tools": {}},
+                          "serverInfo": {"name": "agent-ledger", "version": __version__},
+                          "instructions": "Call log_work after you finish each task, so the user can see "
+                                          "what their AI agents did today."}
+            elif method == "ping":
+                result = {}
+            elif method == "tools/list":
+                result = {"tools": MCP_TOOLS}
+            elif method == "tools/call":
+                try:
+                    text = mcp_call(params.get("name"), params.get("arguments") or {})
+                    result = {"content": [{"type": "text", "text": text}], "isError": False}
+                except KeyError:
+                    send({"jsonrpc": "2.0", "id": rid,
+                          "error": {"code": -32602, "message": f"Unknown tool: {params.get('name')}"}})
+                    continue
+                except (ValueError, SystemExit) as e:
+                    result = {"content": [{"type": "text", "text": f"Agent Ledger: {e}"}], "isError": True}
+            else:
+                send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Unknown method: {method}"}})
+                continue
+            send({"jsonrpc": "2.0", "id": rid, "result": result})
+        except Exception as e:                         # never let one bad request kill the server
+            send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": str(e)}})
+
+
+def cmd_mcp_install(args) -> None:
+    """Register the MCP server with Cursor and Codex, and show the Claude Code command."""
+    check_args(args, cmd="mcp-install")
+    locate()                                           # fail early if Agent Ledger isn't set up
+    script = str(Path(__file__).resolve())
+    print("Agent Ledger MCP server\n")
+
+    cursor = Path.home() / ".cursor" / "mcp.json"
+    try:
+        data = json.loads(cursor.read_text(encoding="utf-8")) if cursor.exists() else {}
+        if not isinstance(data, dict) or not isinstance(data.setdefault("mcpServers", {}), dict):
+            raise ValueError
+        state = "updated" if "agent-ledger" in data["mcpServers"] else "added"
+        data["mcpServers"]["agent-ledger"] = {"command": "python3", "args": [script, "mcp"]}
+        cursor.parent.mkdir(parents=True, exist_ok=True)
+        cursor.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        print(f"  Cursor       {short(cursor):<28} {state}")
+    except (OSError, ValueError):
+        print(f"  Cursor       {short(cursor):<28} skipped (couldn't read it; add the server by hand)")
+
+    codex = Path.home() / ".codex" / "config.toml"
+    block = f'\n[mcp_servers.agent-ledger]\ncommand = "python3"\nargs = [{json.dumps(script)}, "mcp"]\n'
+    try:
+        text = codex.read_text(encoding="utf-8") if codex.exists() else ""
+        if "[mcp_servers.agent-ledger]" in text:
+            print(f"  Codex        {short(codex):<28} already there")
+        else:
+            codex.parent.mkdir(parents=True, exist_ok=True)
+            codex.write_text(text + ("\n" if text and not text.endswith("\n") else "") + block, encoding="utf-8")
+            print(f"  Codex        {short(codex):<28} added")
+    except OSError:
+        print(f"  Codex        {short(codex):<28} skipped (couldn't write it)")
+
+    print(f"\n  Claude Code: run this once:")
+    print(f'    claude mcp add --scope user agent-ledger -- python3 "{script}" mcp')
+    print("\nRestart your agents, then they can call the log_work tool.")
 
 
 # ---------------------------------------------------------------- update
@@ -1245,6 +1408,10 @@ def main() -> None:
         cmd_hook(rest)
     elif cmd == "update":
         cmd_update(rest)
+    elif cmd == "mcp":
+        cmd_mcp(rest)
+    elif cmd == "mcp-install":
+        cmd_mcp_install(rest)
     elif cmd == "_refresh":
         cmd_refresh(rest)
     else:
