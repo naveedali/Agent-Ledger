@@ -298,6 +298,50 @@ class TestMcp(LedgerTestCase):
         self.assertEqual(text.count("[mcp_servers.agent-ledger]"), 1)
 
 
+class TestCommitSafetyNet(LedgerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init", "--global")
+        self.script = self.gl / "ledger.py"
+        self.repo = self.git_repo("client-app")
+        self.hook = self.repo / ".git" / "hooks" / "post-commit"
+        self.hook.write_text("#!/bin/sh\necho mine\n")
+        self.hook.chmod(0o755)
+        self.run_cli("git-hook", "install", script=self.script, cwd=self.repo)
+
+    def commit(self, name):
+        (self.repo / name).write_text("x")
+        for cmd in (["add", name], ["commit", "-q", "-m", f"add {name}"]):
+            subprocess.run(["git", *cmd], cwd=self.repo, env=self.env, check=True, capture_output=True)
+
+    def git_entries(self):
+        f = self.gl / TODAY / "git.md"
+        return f.read_text() if f.exists() else ""
+
+    def test_unlogged_commit_is_logged(self):
+        self.commit("a.kt")
+        text = self.git_entries()
+        self.assertIn("Commit: add a.kt", text)
+        self.assertIn("- Files: a.kt", text)
+        self.assertIn("- Repo: ~/client-app", text)
+
+    def test_commit_after_agent_logged_is_skipped(self):
+        self.run_cli("log", "--agent", "codex", "--task", "Built a", script=self.script, cwd=self.repo)
+        self.commit("b.kt")
+        self.assertEqual(self.git_entries(), "")
+
+    def test_existing_hook_is_kept_and_uninstall_is_clean(self):
+        self.run_cli("git-hook", "install", script=self.script, cwd=self.repo)     # idempotent
+        text = self.hook.read_text()
+        self.assertIn("echo mine", text)
+        self.assertEqual(text.count("agent-ledger >>>"), 1)
+        self.run_cli("git-hook", "uninstall", str(self.repo), script=self.script)
+        self.assertEqual(self.hook.read_text().strip(), "#!/bin/sh\necho mine")
+
+    def test_status_shows_it(self):
+        self.assertIn("on for client-app", self.run_cli("status", script=self.script, cwd=self.repo).stdout)
+
+
 class TestUnits(unittest.TestCase):
     def test_redact(self):
         r = ledger.redact

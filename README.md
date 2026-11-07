@@ -163,6 +163,17 @@ Restart your agents and they get four tools:
 
 So you can also just ask an agent *"what did we do this week?"* and it answers from the ledger.
 
+## Commit safety net (optional)
+
+Turn it on in any repo, and a commit nobody logged still makes it into your ledger:
+
+```bash
+cd your-project
+agent-ledger git-hook install        # agent-ledger git-hook uninstall to remove
+```
+
+After each commit, if no agent logged work for that repo in the last 30 minutes, an entry is added for agent `git` with the commit message and files. It never blocks or slows a commit, keeps any `post-commit` hook you already have, and skips merge commits. Set `AGENT_LEDGER_COMMIT_WINDOW` (minutes) to change the window.
+
 ## Reports for any date range
 
 For a weekly review, a client update or an invoice, build a report across several days:
@@ -210,6 +221,7 @@ The page has summary tiles, a status bar, every project's work grouped by day, f
 | `ledger.py update` | Refresh installed copies and rules after upgrading |
 | `ledger.py mcp-install` | Add the MCP server to Cursor and Codex (prints the Claude Code command) |
 | `ledger.py mcp` | Run the MCP server (your agent starts this for you) |
+| `ledger.py git-hook install [repo]` | Log commits no agent logged (`uninstall` to remove) |
 | `ledger.py --version` | Show the version |
 
 ## Updating
