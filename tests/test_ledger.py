@@ -253,7 +253,7 @@ class TestMcp(LedgerTestCase):
         self.assertEqual(r[1]["result"]["protocolVersion"], "2025-06-18")
         self.assertEqual(r[1]["result"]["serverInfo"]["name"], "agent-ledger")
         names = {t["name"] for t in r[2]["result"]["tools"]}
-        self.assertEqual(names, {"log_work", "daily_digest", "work_report", "ledger_status"})
+        self.assertEqual(names, {"log_work", "daily_digest", "work_report", "standup", "ledger_status"})
         self.assertEqual(r[3]["result"], {})
         self.assertEqual(len(r), 3)                     # no reply to the notification
 
@@ -406,6 +406,46 @@ class TestRecover(LedgerTestCase):
         self.codex("e", 'await tools.exec_command({cmd: "echo x > a.kt"})',
                    f'await tools.exec_command({{cmd: "cat >> ~/agent-ledger/{TODAY}/codex.md"}})')
         self.assertIn("Nothing to recover", self.run_cli("recover", script=self.script).stdout)
+
+
+class TestStandup(LedgerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init", "--global")
+        self.script = self.gl / "ledger.py"
+        self.prev = str(dt.date.today() - dt.timedelta(days=3))      # e.g. a Friday before a weekend
+        for day, agent, body in [
+            (self.prev, "codex", "## 10:00 · app · DONE\n- Task: Built settings, mailed a@b.io\n"
+                                 "## 15:00 · app · PARTIAL\n- Task: Auth screens\n- Follow-up: Signup validation\n"
+                                 "## 16:00 · pay · BLOCKED\n- Task: Payments\n- Follow-up: keys\n"),
+            (TODAY, "claude", "## 09:00 · app · DONE\n- Task: Profile editor\n"),
+        ]:
+            (self.gl / day).mkdir(parents=True, exist_ok=True)
+            (self.gl / day / f"{agent}.md").write_text(body)
+
+    def test_sections(self):
+        out = self.run_cli("standup", script=self.script).stdout
+        last, today, blockers = out.split("\n\n")[1:4]
+        self.assertIn("Last working day", last)
+        self.assertIn("Built settings", last)
+        self.assertIn("Auth screens, in progress", last)
+        self.assertIn("Done: Profile editor", today)
+        self.assertIn("Signup validation", today)
+        self.assertIn("Continue: Auth screens", today)
+        self.assertNotIn("keys (pay)", today)                 # blocker follow-ups stay in Blockers
+        self.assertIn("Payments (needs: keys) (pay)", blockers)
+
+    def test_filters_and_redact(self):
+        out = self.run_cli("standup", "--project", "pay", "--redact", script=self.script).stdout
+        self.assertNotIn("Built settings", out)
+        self.assertIn("Payments", out)
+        out = self.run_cli("standup", "--redact", script=self.script).stdout
+        self.assertNotIn("a@b.io", out)
+
+    def test_empty(self):
+        out = self.run_cli("standup", "--date", "2020-01-01", script=self.script).stdout
+        self.assertIn("Nothing logged", out)
+        self.assertIn("None", out)
 
 
 class TestUnits(unittest.TestCase):

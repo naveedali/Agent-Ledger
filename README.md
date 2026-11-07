@@ -152,13 +152,14 @@ This adds the server to **Cursor** (`~/.cursor/mcp.json`) and **Codex** (`~/.cod
 claude mcp add --scope user agent-ledger -- python3 "/path/to/ledger.py" mcp
 ```
 
-Restart your agents and they get four tools:
+Restart your agents and they get five tools:
 
 | Tool | What it does |
 |---|---|
 | `log_work` | Add an entry to today's log (same fields as `ledger.py log`) |
 | `daily_digest` | Today's (or any day's) digest |
 | `work_report` | A report for a date range, with `project`, `agent` and `redact` options |
+| `standup` | Yesterday / Today / Blockers |
 | `ledger_status` | Check the setup |
 
 So you can also just ask an agent *"what did we do this week?"* and it answers from the ledger.
@@ -187,6 +188,30 @@ agent-ledger recover --apply           # add it to your ledger
 Each recovered entry uses the agent's own end-of-task summary, the files it changed (or the files in commits made during the session), and a note that it was recovered. Sessions that already logged, read-only sessions, and anything recovered before are skipped, so it's safe to run any time. Nothing leaves your machine.
 
 It reads `~/.codex/sessions` and `~/.claude/projects` (or `CODEX_HOME` and `CLAUDE_CONFIG_DIR` if you set them). Both formats belong to those tools and can change between versions, so treat this as a best-effort backup to logging, not a replacement.
+
+## Standup in one command
+
+```bash
+agent-ledger standup
+```
+
+```
+Standup · Mon 09 Nov 2026
+
+Last working day (Fri 06 Nov)
+• Added a Contact & Support section to Settings (project-xyz)
+• Migrate auth screens to Compose, in progress (client-app)
+
+Today
+• Done: Committed the profile editor with change notes (project-xyz)
+• Finish signup validation (client-app)
+• Continue: Migrate auth screens to Compose (client-app)
+
+Blockers
+• Payment integration (needs: production keys) (client-app)
+```
+
+Plain text, so it pastes cleanly into Slack, Teams or a meeting chat. "Yesterday" is your last day with logged work, so Monday shows Friday. **Today** collects what's already done today, plus follow-ups and unfinished work carried over. Filter with `--project` or `--agent`, add `--redact` before sharing, and use `--date` for another day. MCP agents get it as the `standup` tool.
 
 ## Reports for any date range
 
@@ -229,6 +254,7 @@ The page has summary tiles, a status bar, every project's work grouped by day, f
 | `ledger.py compile` | Build today's digest (saves `DIGEST.md`) |
 | `ledger.py compile --date yesterday` | Another day (`yesterday` or `YYYY-MM-DD`) |
 | `ledger.py today --open` | Today's digest as a web page (`--html` saves it without opening) |
+| `ledger.py standup` | Yesterday / Today / Blockers, ready to paste. Options: `--project`, `--agent`, `--redact`, `--date` |
 | `ledger.py week` | Report for the last 7 days |
 | `ledger.py report --from DATE --to DATE` | Report for any date range. Options: `--project`, `--agent`, `--redact`, `--html`, `--open`, `--print`, `--out` |
 | `ledger.py status` | Check the setup and see why nothing was logged |

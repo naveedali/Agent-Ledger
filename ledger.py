@@ -15,6 +15,8 @@ Usage:
                                             Add an entry to today's log (used by agents)
   python3 ledger.py report [--from DATE] [--to DATE] [--project NAME] [--agent NAME] [--redact]
                                             Work report for a date range (default: last 7 days)
+  python3 ledger.py standup [--project NAME] [--agent NAME] [--redact]
+                                            Yesterday / Today / Blockers, ready to paste
   python3 ledger.py week [--project NAME] [--redact]
                                             Report for the last 7 days
         reports also take --html (formatted page) and --open (open it in your browser)
@@ -750,6 +752,66 @@ def cmd_report(args, week=False) -> None:
             open_file(page)
 
 
+# ---------------------------------------------------------------- standup
+
+def build_standup(mode, logs, project, day: str, project_filter=None, agent_filter=None, hide=False,
+                  limit=8) -> str:
+    """Yesterday (last working day) / Today / Blockers as plain text that pastes anywhere."""
+    today = dt.date.fromisoformat(day)
+    clean = redact if hide else (lambda x: x)
+    prev_day, prev = None, []
+    for back in range(1, 15):                          # the last day that has entries
+        d = str(today - dt.timedelta(days=back))
+        prev = collect(logs, d, d, project_filter, agent_filter)
+        if prev:
+            prev_day = d
+            break
+    now = collect(logs, day, day, project_filter, agent_filter)
+
+    def item(text, e):
+        return f"• {clean(text)} ({clean(e['project'])})"
+
+    def section(title, items):
+        items = list(dict.fromkeys(items))            # no duplicates, keep order
+        body = items[:limit] + ([f"• …and {len(items) - limit} more"] if len(items) > limit else [])
+        return [title] + (body or ["• Nothing logged"]) + [""]
+
+    if prev_day:
+        gap = (today - dt.date.fromisoformat(prev_day)).days
+        when = "Yesterday" if gap == 1 else f"Last working day ({dt.date.fromisoformat(prev_day):%a %d %b})"
+    else:
+        when = "Yesterday"
+    out = [f"Standup · {today:%a %d %b %Y}", ""]
+    out += section(when, [item(e["task"], e) for e in prev if e["status"] == "DONE"]
+                   + [item(e["task"] + ", in progress", e) for e in prev if e["status"] == "PARTIAL"])
+
+    done_today = [item(e["task"], e) for e in now if e["status"] == "DONE"]
+    finished = {e["task"].lower() for e in now if e["status"] == "DONE"}
+    carried = [item(e["follow-up"], e) for e in prev + now if e["follow-up"] and e["status"] != "BLOCKED"
+               and e["follow-up"].lower() not in finished]
+    carried += [item("Continue: " + e["task"], e) for e in prev + now
+                if e["status"] == "PARTIAL" and e["task"].lower() not in finished]
+    today_items = [f"{x[:2]}Done: {x[2:]}" for x in done_today] + carried
+    out += section("Today", today_items)
+
+    blocked = [item(e["task"] + (f" (needs: {e['follow-up']})" if e["follow-up"] else ""), e)
+               for e in prev + now if e["status"] == "BLOCKED"]
+    out += ["Blockers"] + ((blocked[:limit]) or ["• None"]) + [""]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def cmd_standup(args) -> None:
+    import argparse
+    ap = argparse.ArgumentParser(prog="ledger.py standup", description="Yesterday / Today / Blockers.")
+    ap.add_argument("--date", default="today", help="the standup day (default: today)")
+    ap.add_argument("--project", help="only this project")
+    ap.add_argument("--agent", help="only this agent")
+    ap.add_argument("--redact", action="store_true", help="hide emails, keys and home paths")
+    a = ap.parse_args(args)
+    mode, logs, project = locate()
+    print(build_standup(mode, logs, project, to_day(a.date), a.project, a.agent, a.redact), end="")
+
+
 # ---------------------------------------------------------------- html
 
 HTML_CSS = """
@@ -1371,6 +1433,12 @@ MCP_TOOLS = [
          "project": {"type": "string", "description": "Only this project"},
          "agent": {"type": "string", "description": "Only this agent"},
          "redact": {"type": "boolean", "description": "Hide emails, keys and home paths", "default": False}}}},
+    {"name": "standup",
+     "description": "A standup update from the Agent Ledger: what was done on the last working day, "
+                    "what's next today, and blockers. Plain text, ready to paste.",
+     "inputSchema": {"type": "object", "properties": {
+         "date": _DATE, "project": {"type": "string"}, "agent": {"type": "string"},
+         "redact": {"type": "boolean", "default": False}}}},
     {"name": "ledger_status",
      "description": "Check the Agent Ledger setup: where logs go, which agent rules are in place, "
                     "and who has logged today.",
@@ -1393,6 +1461,9 @@ def mcp_call(name: str, a: dict) -> str:
         since = to_day(a["from"]) if a.get("from") else str(dt.date.fromisoformat(until) - dt.timedelta(days=6))
         return build_report(mode, logs, project, since, until, a.get("project"), a.get("agent"),
                             bool(a.get("redact")))
+    if name == "standup":
+        return build_standup(mode, logs, project, to_day(a.get("date") or "today"), a.get("project"),
+                             a.get("agent"), bool(a.get("redact")))
     if name == "ledger_status":
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -1681,6 +1752,8 @@ def main() -> None:
         cmd_report(rest)
     elif cmd == "week":
         cmd_report(rest, week=True)
+    elif cmd == "standup":
+        cmd_standup(rest)
     elif cmd == "hook":
         cmd_hook(rest)
     elif cmd == "update":
