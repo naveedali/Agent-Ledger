@@ -44,7 +44,7 @@ Global mode                          Project mode
 **1. Get it**
 
 ```bash
-pipx install agent-ledger-cli      # or: pip install agent-ledger-cli
+pipx install ai-agent-ledger      # or: pip install ai-agent-ledger
 ```
 
 That gives you the `agent-ledger` command. Prefer no install? Clone the repo and use `python3 Agent-Ledger/ledger.py` wherever this README says `agent-ledger`:
@@ -286,7 +286,7 @@ The page has summary tiles, a status bar, an **Activity** chart (tasks per day b
 `init` puts a copy of `ledger.py` in your ledger (`~/agent-ledger/` or a project's `ledger/`), so pulling new code doesn't change those copies. After you upgrade, refresh them in one step:
 
 ```bash
-pipx upgrade agent-ledger-cli                # if you installed with pipx
+pipx upgrade ai-agent-ledger                # if you installed with pipx
 agent-ledger update                          # updates every copy it knows about
 agent-ledger update path/to/project          # or name a project explicitly
 ```
@@ -326,7 +326,7 @@ The usual causes:
 ## FAQ
 
 **It says "Unknown command" for a command in this README.**
-You're running an older copy. Run `agent-ledger update` (after `pipx upgrade agent-ledger-cli`), or `python3 ledger.py update` from your clone after `git pull`.
+You're running an older copy. Run `agent-ledger update` (after `pipx upgrade ai-agent-ledger`), or `python3 ledger.py update` from your clone after `git pull`.
 
 **Can I change where the global ledger lives?**
 Yes. Set `AGENT_LEDGER_HOME` (for example to a synced folder) before running `init --global`.

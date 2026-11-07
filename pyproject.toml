@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-ledger-cli"
+name = "ai-agent-ledger"
 dynamic = ["version"]
 description = "One daily log for all your AI coding agents: Claude Code, Codex, Cursor and any agent that reads AGENTS.md."
 readme = "README.md"
