@@ -202,6 +202,17 @@ class TestReports(LedgerTestCase):
         self.assertIn("<!DOCTYPE html>", page)
         self.assertIn("Daily Digest", page)
 
+    def test_html_charts(self):
+        self.run_cli("week", "--html", script=self.script)
+        page = next((self.gl / "reports").glob("*.html")).read_text()
+        self.assertIn("Tasks per day", page)
+        self.assertEqual(page.count("class='col'"), 7)                    # one column per day, empty days too
+        self.assertIn("Tasks per agent", page)                             # claude and codex both logged
+        self.assertIn("data-tip='claude: 1 task'", page)
+        self.run_cli("today", "--html", script=self.script)
+        digest = (self.gl / TODAY / "DIGEST.html").read_text()
+        self.assertNotIn("Tasks per day", digest)                          # one day: no timeline
+
     def test_bad_range(self):
         r = self.run_cli("report", "--from", "today", "--to", "yesterday", script=self.script, ok=False)
         self.assertNotEqual(r.returncode, 0)
