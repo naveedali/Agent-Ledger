@@ -6,14 +6,18 @@ Usage:
   python3 ledger.py init --global           One ledger for all projects, no repo files
   python3 ledger.py init --project [DIR]    Ledger inside a project (default: current folder)
         add --private to keep ledger/ out of git (local only)
+        add --no-hook to skip the Claude Code log reminder
   python3 ledger.py today  [--date DATE]    Build the digest and print it
   python3 ledger.py compile [--date DATE]   Build the digest (saves DIGEST.md)
   python3 ledger.py status                  Check the setup / why nothing was logged
+  python3 ledger.py log --agent NAME --task "..." [--files ...] [--status PARTIAL|BLOCKED]
+                                            Add an entry to today's log (used by agents)
 
 DATE is YYYY-MM-DD or 'yesterday'. No dependencies. Python 3.8+.
 """
 
 import datetime as dt
+import json
 import os
 import re
 import shutil
@@ -42,16 +46,17 @@ def agent_rules(log_dir: str, script: str, with_repo: bool) -> str:
     return f"""{MARK_START}
 ## Agent Ledger (work logging)
 
-After you finish any task, add an entry to the END of:
+After you finish any task, log it with ONE command:
 
-    {log_dir}/<YYYY-MM-DD>/<agent>.md
+    python3 {script} log --agent <agent> --task "<one line: what was done>" --files "<main files>"
 
-- `<YYYY-MM-DD>` is today's local date (run `date +%F` if unsure).
 - `<agent>` is your name in lowercase: `claude`, `codex`, `cursor`, `gemini`, ...
-- Create the folder and file if they don't exist.
-- Only ever write to YOUR file. Never edit another agent's file or DIGEST.md.
+- Optional: `--status PARTIAL` or `--status BLOCKED`, `--follow-up "<what's left>"`,
+  `--notes "<one line>"`, `--project "<name>"` (defaults to the git repo name).
+- Keep it short: outcomes, not a play-by-play.
 
-Use exactly this format:
+If you can't run commands, add the entry by hand to the END of
+`{log_dir}/<YYYY-MM-DD>/<agent>.md` (today's local date; create it if missing):
 
     ## HH:MM · <project> · DONE | PARTIAL | BLOCKED
     - Task: <one line: what was done>
@@ -59,7 +64,7 @@ Use exactly this format:
     - Notes: <optional, one line>
     - Follow-up: <optional, what's left>
 
-Keep it short: outcomes, not a play-by-play.
+Only ever write to YOUR file. Never edit another agent's file or DIGEST.md.
 
 When the user asks for a digest / daily summary / "what did we do today":
 1. Run `python3 {script} compile`
@@ -108,9 +113,49 @@ def short(path: Path) -> str:
         return str(path)
 
 
+# ---------------------------------------------------------------- Claude Code hook
+
+HOOK_MARK = "hook claude"
+
+
+def install_claude_hook(settings: Path, command: str) -> str:
+    """Add (or refresh) the Agent Ledger Stop hook in a Claude Code settings file."""
+    data = {}
+    if settings.exists():
+        try:
+            data = json.loads(settings.read_text(encoding="utf-8") or "{}")
+        except ValueError:
+            return "skipped (settings file isn't valid JSON, add the hook by hand)"
+    if not isinstance(data, dict) or not isinstance(data.setdefault("hooks", {}), dict) \
+            or not isinstance(data["hooks"].setdefault("Stop", []), list):
+        return "skipped (unexpected settings format, add the hook by hand)"
+    status = "added"
+    for group in data["hooks"]["Stop"]:
+        for h in (group.get("hooks", []) if isinstance(group, dict) else []):
+            if isinstance(h, dict) and "ledger.py" in str(h.get("command", "")) \
+                    and HOOK_MARK in str(h.get("command", "")):
+                h["command"], status = command, "updated"
+    if status == "added":
+        data["hooks"]["Stop"].append({"hooks": [{"type": "command", "command": command}]})
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return status
+
+
+def has_claude_hook(*settings_files: Path) -> bool:
+    for f in settings_files:
+        try:
+            if f.exists() and "ledger.py" in f.read_text(encoding="utf-8") and \
+                    HOOK_MARK in f.read_text(encoding="utf-8"):
+                return True
+        except OSError:
+            pass
+    return False
+
+
 # ---------------------------------------------------------------- init
 
-def init_global() -> None:
+def init_global(hook: bool = True) -> None:
     home = global_home()
     home.mkdir(parents=True, exist_ok=True)
     (home / GLOBAL_MARKER).write_text("Agent Ledger global home\n", encoding="utf-8")
@@ -127,6 +172,10 @@ def init_global() -> None:
     cmd.parent.mkdir(parents=True, exist_ok=True)
     cmd.write_text(digest_command(script), encoding="utf-8")
     print(f"  {short(cmd):<34} created (/digest in Claude Code)")
+    if hook:
+        settings = Path.home() / ".claude" / "settings.json"
+        command = f'python3 "{(home / "ledger.py").resolve()}" {HOOK_MARK}'
+        print(f"  {short(settings):<34} log reminder hook {install_claude_hook(settings, command)}")
 
     cursor_rule = home / "CURSOR_RULE.md"
     cursor_rule.write_text(rules, encoding="utf-8")
@@ -138,7 +187,7 @@ def init_global() -> None:
     print(f"  Something not logging?  python3 {script} status")
 
 
-def init_project(project: Path, private: bool) -> None:
+def init_project(project: Path, private: bool, hook: bool = True) -> None:
     project = project.resolve()
     if not project.is_dir():
         sys.exit(f"Not a folder: {project}")
@@ -162,6 +211,14 @@ def init_project(project: Path, private: bool) -> None:
     cmd.parent.mkdir(parents=True, exist_ok=True)
     cmd.write_text(digest_command(f"{PROJECT_DIR_NAME}/ledger.py"), encoding="utf-8")
     print(f"  {'.claude/commands/digest.md':<28} created (/digest in Claude Code)")
+    if hook:
+        # Private setups use settings.local.json, which Claude Code keeps out of git.
+        name = "settings.local.json" if private else "settings.json"
+        command = f'python3 "$CLAUDE_PROJECT_DIR/{PROJECT_DIR_NAME}/ledger.py" {HOOK_MARK}'
+        result = install_claude_hook(project / ".claude" / name, command)
+        print(f"  {'.claude/' + name:<28} log reminder hook {result}")
+        if private:
+            hide.append(f"/.claude/{name}")
 
     if private:
         if (project / ".git").is_dir():
@@ -224,6 +281,7 @@ def cmd_init(args) -> None:
     flags = [a for a in args if a.startswith("--")]
     paths = [a for a in args if not a.startswith("--")]
     private = "--private" in flags
+    hook = "--no-hook" not in flags
 
     if "--global" in flags:
         mode = "global"
@@ -233,11 +291,11 @@ def cmd_init(args) -> None:
         mode = ask_mode()
 
     if mode == "global":
-        init_global()
+        init_global(hook)
     else:
         if "--project" not in flags and not paths and not private:
             private = ask_yes("Keep the ledger/ folder out of git (local only)?")
-        init_project(Path(paths[0]) if paths else Path.cwd(), private)
+        init_project(Path(paths[0]) if paths else Path.cwd(), private, hook)
 
 
 # ---------------------------------------------------------------- compile
@@ -393,6 +451,113 @@ def cmd_compile(args, show=False) -> None:
     print(digest if show else f"Wrote {day_dir / 'DIGEST.md'}")
 
 
+# ---------------------------------------------------------------- log
+
+def git_root(path: Path):
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=path,
+                             capture_output=True, text=True, timeout=10)
+        return Path(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def one_line(s: str) -> str:
+    return " ".join(str(s).split())
+
+
+def cmd_log(args) -> None:
+    import argparse
+    ap = argparse.ArgumentParser(prog="ledger.py log", description="Add one entry to today's log.")
+    ap.add_argument("--agent", required=True, help="your name: claude, codex, cursor, ...")
+    ap.add_argument("--task", required=True, help="one line: what was done")
+    ap.add_argument("--status", default="DONE", type=str.upper, choices=STATUSES)
+    ap.add_argument("--files", default="", help="main files touched")
+    ap.add_argument("--project", help="project name (default: git repo name)")
+    ap.add_argument("--notes", default="")
+    ap.add_argument("--follow-up", dest="follow_up", default="", help="what's left to do")
+    ap.add_argument("--repo", help="repo path (default: the git repo you're in)")
+    a = ap.parse_args(args)
+
+    mode, logs, project = locate()
+    now = dt.datetime.now()
+    repo = Path(a.repo).expanduser().resolve() if a.repo else git_root(Path.cwd())
+    name = a.project or (repo.name if repo else (project.name if project else Path.cwd().name))
+    agent = re.sub(r"[^a-z0-9_-]", "", a.agent.lower()) or "agent"
+
+    lines = [f"## {now:%H:%M} · {one_line(name)} · {a.status}", f"- Task: {one_line(a.task)}"]
+    if a.files:
+        lines.append(f"- Files: {one_line(a.files)}")
+    if mode == "global" and repo:
+        lines.append(f"- Repo: {short(repo)}")
+    if a.notes:
+        lines.append(f"- Notes: {one_line(a.notes)}")
+    if a.follow_up:
+        lines.append(f"- Follow-up: {one_line(a.follow_up)}")
+
+    path = logs / f"{now:%Y-%m-%d}" / f"{agent}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gap = "\n" if path.exists() and path.stat().st_size else ""
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(gap + "\n".join(lines) + "\n")
+    print(f"Logged to {short(path)}")
+
+
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+
+def cmd_hook(args) -> None:
+    """Claude Code Stop hook: if files were changed but nothing was logged, ask Claude to log.
+
+    Never fails loudly: any problem means "do nothing", so it can't break a session.
+    """
+    try:
+        if not args or args[0] != "claude":
+            return
+        data = json.load(sys.stdin)
+        if data.get("stop_hook_active"):          # we already reminded once; let it stop
+            return
+        transcript = Path(str(data.get("transcript_path", ""))).expanduser()
+        if not transcript.is_file():
+            return
+        mode, logs, _ = locate()
+        logs_str = str(logs.resolve())
+
+        step, last_edit, last_log = 0, -1, -1
+        with open(transcript, encoding="utf-8", errors="ignore") as fh:
+            for raw in fh:
+                try:
+                    content = (json.loads(raw).get("message") or {}).get("content")
+                except (ValueError, AttributeError):
+                    continue
+                for c in content if isinstance(content, list) else []:
+                    if not isinstance(c, dict) or c.get("type") != "tool_use":
+                        continue
+                    step += 1
+                    name, inp = c.get("name"), c.get("input") or {}
+                    if name == "Bash":
+                        cmd = str(inp.get("command", ""))
+                        if "ledger.py" in cmd and re.search(r"\blog\b", cmd):
+                            last_log = step
+                    elif name in EDIT_TOOLS:
+                        target = str(inp.get("file_path") or inp.get("notebook_path") or "")
+                        if target and str(Path(target).expanduser().resolve()).startswith(logs_str):
+                            last_log = step               # wrote the log by hand
+                        elif target:
+                            last_edit = step
+
+        if last_edit > last_log:
+            script = short(Path(__file__).resolve()) if mode == "global" else f"{PROJECT_DIR_NAME}/ledger.py"
+            print(json.dumps({"decision": "block", "reason": (
+                "Agent Ledger: you changed files but haven't logged this work yet. "
+                f'If the task is finished (or blocked), run: python3 {script} log --agent claude '
+                '--task "<one line: what was done>" --files "<main files>" '
+                '(add --status PARTIAL/BLOCKED or --follow-up "..." if needed). '
+                "If you're still mid-task, just continue.")}))
+    except (Exception, SystemExit):
+        return
+
+
 # ---------------------------------------------------------------- status
 
 def has_rules(path: Path) -> bool:
@@ -421,6 +586,13 @@ def cmd_status(args) -> None:
         print(f"    {ok if found else warn} {agent:<15} {short(path)}")
         if not found:
             problems.append(f"Rule missing for {agent}. Run `init` again.")
+    if mode == "project":
+        hook_files = [project / ".claude" / "settings.json", project / ".claude" / "settings.local.json"]
+    else:
+        hook_files = [Path.home() / ".claude" / "settings.json"]
+    hooked = has_claude_hook(*hook_files)
+    print(f"    {ok if hooked else '·  '} {'Claude reminder':<15} "
+          f"{'hook on (asks Claude to log if it forgets)' if hooked else 'hook off (optional, run init again)'}")
     if mode == "global":
         print(f"    ·  {'Cursor':<15} paste {short(logs / 'CURSOR_RULE.md')} into Settings → Rules → User Rules")
 
@@ -477,6 +649,10 @@ def main() -> None:
         cmd_compile(rest, show=True)
     elif cmd == "status":
         cmd_status(rest)
+    elif cmd == "log":
+        cmd_log(rest)
+    elif cmd == "hook":
+        cmd_hook(rest)
     else:
         sys.exit(f"Unknown command: {cmd}\n{__doc__}")
 
