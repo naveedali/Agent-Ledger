@@ -232,6 +232,72 @@ class TestUpdate(LedgerTestCase):
         self.assertIn("already up to date", self.run_cli("update").stdout)
 
 
+class TestMcp(LedgerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init", "--global")
+        self.repo = self.git_repo("client-app")
+
+    def rpc(self, *messages):
+        lines = "".join(json.dumps(m) + "\n" for m in messages)
+        out = self.run_cli("mcp", script=self.gl / "ledger.py", cwd=self.repo, stdin=lines).stdout
+        return {r["id"]: r for r in map(json.loads, out.splitlines())}
+
+    def test_handshake_and_tools(self):
+        r = self.rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                      "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                 "clientInfo": {"name": "test", "version": "1"}}},
+                     {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                     {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                     {"jsonrpc": "2.0", "id": 3, "method": "ping"})
+        self.assertEqual(r[1]["result"]["protocolVersion"], "2025-06-18")
+        self.assertEqual(r[1]["result"]["serverInfo"]["name"], "agent-ledger")
+        names = {t["name"] for t in r[2]["result"]["tools"]}
+        self.assertEqual(names, {"log_work", "daily_digest", "work_report", "ledger_status"})
+        self.assertEqual(r[3]["result"], {})
+        self.assertEqual(len(r), 3)                     # no reply to the notification
+
+    def test_log_work_then_digest(self):
+        r = self.rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                          "name": "log_work", "arguments": {"agent": "Cursor", "task": "Wired up MCP",
+                                                            "files": "ledger.py", "follow_up": "Docs"}}},
+                     {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                      "params": {"name": "daily_digest", "arguments": {}}})
+        self.assertFalse(r[1]["result"]["isError"])
+        self.assertIn("cursor.md", r[1]["result"]["content"][0]["text"])
+        digest = r[2]["result"]["content"][0]["text"]
+        self.assertIn("1 task", digest)
+        self.assertIn("client-app", digest)           # project taken from the server's repo
+        self.assertIn("Docs", digest)
+
+    def test_errors_are_reported_not_fatal(self):
+        r = self.rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                      "params": {"name": "log_work", "arguments": {"agent": "x", "task": "y", "status": "nope"}}},
+                     {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "nope"}},
+                     {"jsonrpc": "2.0", "id": 3, "method": "nope"},
+                     {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                      "params": {"name": "work_report", "arguments": {"from": "yesterday"}}})
+        self.assertTrue(r[1]["result"]["isError"])
+        self.assertEqual(r[2]["error"]["code"], -32602)
+        self.assertEqual(r[3]["error"]["code"], -32601)
+        self.assertIn("Work Report", r[4]["result"]["content"][0]["text"])
+
+    def test_mcp_install_merges_existing_configs(self):
+        cursor = self.home / ".cursor" / "mcp.json"
+        cursor.parent.mkdir(parents=True)
+        cursor.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}))
+        codex = self.home / ".codex" / "config.toml"
+        codex.write_text('model = "o4"\n')
+        self.run_cli("mcp-install", script=self.gl / "ledger.py")
+        self.run_cli("mcp-install", script=self.gl / "ledger.py")      # safe to repeat
+        servers = json.loads(cursor.read_text())["mcpServers"]
+        self.assertIn("other", servers)
+        self.assertEqual(servers["agent-ledger"]["args"][-1], "mcp")
+        text = codex.read_text()
+        self.assertTrue(text.startswith('model = "o4"'))
+        self.assertEqual(text.count("[mcp_servers.agent-ledger]"), 1)
+
+
 class TestUnits(unittest.TestCase):
     def test_redact(self):
         r = ledger.redact

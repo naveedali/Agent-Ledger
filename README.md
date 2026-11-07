@@ -138,6 +138,31 @@ Projects: Atfal Compass, Client App
 - `a91c2e4` [client-app] 16:20 docs: add README
 ```
 
+## Use it as an MCP server (optional)
+
+Agents that support [MCP](https://modelcontextprotocol.io) can log through a real tool instead of a shell command. It's more reliable, and works even where an agent can't run commands. No extra install: the server is built into `ledger.py`.
+
+```bash
+agent-ledger mcp-install
+```
+
+This adds the server to **Cursor** (`~/.cursor/mcp.json`) and **Codex** (`~/.codex/config.toml`), keeping what's already there, and prints the one command to add it to **Claude Code**:
+
+```bash
+claude mcp add --scope user agent-ledger -- python3 "/path/to/ledger.py" mcp
+```
+
+Restart your agents and they get four tools:
+
+| Tool | What it does |
+|---|---|
+| `log_work` | Add an entry to today's log (same fields as `ledger.py log`) |
+| `daily_digest` | Today's (or any day's) digest |
+| `work_report` | A report for a date range, with `project`, `agent` and `redact` options |
+| `ledger_status` | Check the setup |
+
+So you can also just ask an agent *"what did we do this week?"* and it answers from the ledger.
+
 ## Reports for any date range
 
 For a weekly review, a client update or an invoice, build a report across several days:
@@ -183,6 +208,8 @@ The page has summary tiles, a status bar, every project's work grouped by day, f
 | `ledger.py report --from DATE --to DATE` | Report for any date range. Options: `--project`, `--agent`, `--redact`, `--html`, `--open`, `--print`, `--out` |
 | `ledger.py status` | Check the setup and see why nothing was logged |
 | `ledger.py update` | Refresh installed copies and rules after upgrading |
+| `ledger.py mcp-install` | Add the MCP server to Cursor and Codex (prints the Claude Code command) |
+| `ledger.py mcp` | Run the MCP server (your agent starts this for you) |
 | `ledger.py --version` | Show the version |
 
 ## Updating
