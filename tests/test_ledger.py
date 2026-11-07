@@ -342,6 +342,72 @@ class TestCommitSafetyNet(LedgerTestCase):
         self.assertIn("on for client-app", self.run_cli("status", script=self.script, cwd=self.repo).stdout)
 
 
+class TestRecover(LedgerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init", "--global")
+        self.script = self.gl / "ledger.py"
+        self.repo = self.git_repo("app")
+        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        self.ts = now.isoformat().replace("+00:00", "Z")
+        folder = self.home / ".codex" / "sessions" / dt.date.today().strftime("%Y/%m/%d")
+        folder.mkdir(parents=True)
+        self.codex_dir = folder
+
+    def codex(self, name, *calls, summary="Added the settings screen."):
+        recs = [{"timestamp": self.ts, "type": "session_meta", "payload": {"cwd": str(self.repo)}},
+                {"timestamp": self.ts, "type": "response_item", "payload": {
+                    "type": "message", "role": "user", "content": [{"type": "input_text", "text": "do it"}]}}]
+        recs += [{"timestamp": self.ts, "type": "response_item",
+                  "payload": {"type": "custom_tool_call", "name": "exec", "input": c}} for c in calls]
+        recs.append({"timestamp": self.ts, "type": "event_msg",
+                     "payload": {"type": "task_complete", "last_agent_message": summary}})
+        path = self.codex_dir / f"rollout-x-{name:0>36}.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+
+    def claude(self, *tool_uses, summary=None):
+        folder = self.home / ".claude" / "projects" / "-app"
+        folder.mkdir(parents=True, exist_ok=True)
+        recs = [{"type": "user", "timestamp": self.ts, "cwd": str(self.repo),
+                 "message": {"role": "user", "content": "Fix the login crash"}}]
+        recs += [{"type": "assistant", "timestamp": self.ts, "cwd": str(self.repo), "message": {
+            "role": "assistant", "content": [{"type": "tool_use", "name": n, "input": i}]}} for n, i in tool_uses]
+        if summary:
+            recs.append({"type": "summary", "summary": summary})
+        (folder / "claude-session-1.jsonl").write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+
+    def test_finds_unlogged_sessions_and_skips_logged_ones(self):
+        self.codex("a", 'await tools.apply_patch(`*** Begin Patch\n*** Update File: app/Settings.kt\n@@`)')
+        self.codex("b", 'await tools.exec_command({cmd: "sed -i s/a/b/ x.kt"})', summary="Renamed x.")
+        self.codex("c", 'await tools.exec_command({cmd: "git status"})', summary="Just looked around.")
+        self.codex("d", 'await tools.apply_patch(`*** Update File: y.kt`)',
+                   'await tools.exec_command({cmd: "python3 ledger/ledger.py log --agent codex --task y"})')
+        self.claude(("Edit", {"file_path": str(self.repo / "Login.kt")}), summary="Fixed login crash")
+        out = self.run_cli("recover", script=self.script).stdout
+        self.assertIn("3 sessions", out)
+        self.assertIn("Added the settings screen.", out)
+        self.assertIn("Settings.kt", out)
+        self.assertIn("Renamed x.", out)
+        self.assertIn("claude — Fixed login crash", out)
+        self.assertNotIn("Just looked around", out)        # read-only session
+        self.assertIn("preview", out)
+        self.assertFalse((self.gl / TODAY / "codex.md").exists())
+
+    def test_apply_writes_once(self):
+        self.codex("a", 'await tools.apply_patch(`*** Update File: app/Settings.kt\n`)')
+        self.run_cli("recover", "--apply", script=self.script)
+        text = (self.gl / TODAY / "codex.md").read_text()
+        self.assertIn("- Task: Added the settings screen.", text)
+        self.assertIn("recovered from codex session", text)
+        self.assertIn("- Repo: ~/app", text)
+        self.assertIn("Nothing to recover", self.run_cli("recover", script=self.script).stdout)
+
+    def test_hand_written_ledger_entry_counts_as_logged(self):
+        self.codex("e", 'await tools.exec_command({cmd: "echo x > a.kt"})',
+                   f'await tools.exec_command({{cmd: "cat >> ~/agent-ledger/{TODAY}/codex.md"}})')
+        self.assertIn("Nothing to recover", self.run_cli("recover", script=self.script).stdout)
+
+
 class TestUnits(unittest.TestCase):
     def test_redact(self):
         r = ledger.redact
