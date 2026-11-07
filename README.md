@@ -1,5 +1,7 @@
 # 📒 Agent Ledger
 
+[![Tests](https://github.com/naveedali/Agent-Ledger/actions/workflows/tests.yml/badge.svg)](https://github.com/naveedali/Agent-Ledger/actions/workflows/tests.yml)
+
 **One daily log for all your AI coding agents.**
 
 You ask Claude, Codex and Cursor to do the work, and by evening you can't remember what got done. Agent Ledger fixes that: each agent writes a short note when it finishes a task, and one command turns those notes into a clean daily digest.
@@ -247,6 +249,12 @@ Agent Ledger is deliberately small. If you need more, these are worth a look:
 ## Contributing
 
 Ideas, issues and PRs are welcome. Keep it simple: one file, no dependencies.
+
+Run the tests before opening a PR (standard library only, nothing to install):
+
+```bash
+python3 -m unittest discover -s tests -v
+```
 
 ## License
 
