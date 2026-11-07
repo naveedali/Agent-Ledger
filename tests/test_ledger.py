@@ -64,6 +64,14 @@ class TestBasics(LedgerTestCase):
         r = self.run_cli("today", "--opne", ok=False)
         self.assertIn("Unknown option", r.stderr)
 
+    def test_output_cut_short_is_quiet(self):
+        # `| head -1` closes the pipe early; that must not print a traceback.
+        for args in (["--help"], ["init", "--global", "--no-hook"]):
+            r = subprocess.run(f"{sys.executable} {SCRIPT} {' '.join(args)} | head -1", shell=True,
+                               env=self.env, cwd=str(self.home), capture_output=True, text=True, timeout=60)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertNotIn("BrokenPipeError", r.stderr)
+
     def test_help(self):
         self.assertIn("ledger.py log", self.run_cli("--help").stdout)
 
