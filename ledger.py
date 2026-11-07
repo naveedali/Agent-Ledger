@@ -9,6 +9,7 @@ Usage:
         add --no-hook to skip the Claude Code log reminder
   python3 ledger.py today  [--date DATE]    Build the digest and print it
   python3 ledger.py compile [--date DATE]   Build the digest (saves DIGEST.md)
+        add --html to also save DIGEST.html, --open to open it in your browser
   python3 ledger.py status                  Check the setup / why nothing was logged
   python3 ledger.py log --agent NAME --task "..." [--files ...] [--status PARTIAL|BLOCKED]
                                             Add an entry to today's log (used by agents)
@@ -16,6 +17,7 @@ Usage:
                                             Work report for a date range (default: last 7 days)
   python3 ledger.py week [--project NAME] [--redact]
                                             Report for the last 7 days
+        reports also take --html (formatted page) and --open (open it in your browser)
 
 DATE is YYYY-MM-DD, 'today' or 'yesterday'. No dependencies. Python 3.8+.
 """
@@ -477,6 +479,13 @@ def cmd_compile(args, show=False) -> None:
     digest = build_digest(mode, logs, project, day)
     (day_dir / "DIGEST.md").write_text(digest, encoding="utf-8")
     print(digest if show else f"Wrote {day_dir / 'DIGEST.md'}")
+    if "--html" in args or "--open" in args:
+        page = day_dir / "DIGEST.html"
+        data = report_data(mode, logs, project, day, day, hide="--redact" in args)
+        page.write_text(build_html(data, daily=True), encoding="utf-8")
+        print(f"Wrote {short(page)}")
+        if "--open" in args:
+            open_file(page)
 
 
 # ---------------------------------------------------------------- report
@@ -521,7 +530,8 @@ def collect(logs: Path, since: str, until: str, project_filter=None, agent_filte
     return sorted(entries, key=lambda e: (e["day"], e["time"]))
 
 
-def build_report(mode, logs, project, since, until, project_filter=None, agent_filter=None, hide=False):
+def report_data(mode, logs, project, since, until, project_filter=None, agent_filter=None, hide=False):
+    """Everything a report needs, already filtered and (optionally) redacted."""
     entries = collect(logs, since, until, project_filter, agent_filter)
     commits = commits_for(mode, project, entries, since, until)
     if mode == "global" and project_filter:
@@ -529,16 +539,36 @@ def build_report(mode, logs, project, since, until, project_filter=None, agent_f
         commits = [c for c in commits if c["repo"] in repos]
     if agent_filter:
         commits = []                       # commits can't be tied to one agent
-    clean = redact if hide else (lambda x: x)
+    if hide:
+        for e in entries:
+            for k in ("task", "files", "notes", "follow-up", "project"):
+                e[k] = redact(e[k])
+        for c in commits:
+            c["msg"] = redact(c["msg"])
+    return {
+        "mode": mode, "since": since, "until": until, "hide": hide,
+        "project_filter": project_filter, "agent_filter": agent_filter,
+        "entries": entries, "commits": commits,
+        "count": {s_: sum(e["status"] == s_ for e in entries) for s_ in STATUSES},
+        "projects": sorted({e["project"] for e in entries}, key=str.lower),
+        "agents": sorted({e["agent"] for e in entries}),
+        "days": sorted({e["day"] for e in entries}),
+        "generated": f"{dt.datetime.now():%Y-%m-%d %H:%M}",
+    }
 
-    count = {s_: sum(e["status"] == s_ for e in entries) for s_ in STATUSES}
-    projects = sorted({e["project"] for e in entries}, key=str.lower)
-    agents = sorted({e["agent"] for e in entries})
-    days = sorted({e["day"] for e in entries})
+
+def plural(n, word):
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def nice_day(day):
+    return dt.date.fromisoformat(day).strftime("%a %d %b %Y")
+
+
+def build_report(mode, logs, project, since, until, project_filter=None, agent_filter=None, hide=False):
+    d = report_data(mode, logs, project, since, until, project_filter, agent_filter, hide)
+    entries, commits, count = d["entries"], d["commits"], d["count"]
     icon = {"DONE": "✅", "PARTIAL": "🟡", "BLOCKED": "🔴"}
-
-    def nice(day):
-        return dt.date.fromisoformat(day).strftime("%a %d %b %Y")
 
     title = f"Work Report — {since} → {until}" if since != until else f"Work Report — {since}"
     out = [f"# {title}", ""]
@@ -546,49 +576,48 @@ def build_report(mode, logs, project, since, until, project_filter=None, agent_f
              f"Agent: {agent_filter}" if agent_filter else ""]
     if any(scope):
         out += ["_" + " · ".join(x for x in scope if x) + "_", ""]
-    n = len(commits)
-    out.append(f"**{len(entries)} task{'' if len(entries) == 1 else 's'}** · ✅ {count['DONE']} done · 🟡 {count['PARTIAL']} partial "
-               f"· 🔴 {count['BLOCKED']} blocked · {n} commit{'' if n == 1 else 's'} "
-               f"· {len(days)} active day{'' if len(days) == 1 else 's'}  ")
-    out.append(f"Agents: {', '.join(agents) or 'none'}  ")
-    out.append(f"Projects: {', '.join(clean(p) for p in projects) or 'none'}")
+    out.append(f"**{plural(len(entries), 'task')}** · ✅ {count['DONE']} done · 🟡 {count['PARTIAL']} partial "
+               f"· 🔴 {count['BLOCKED']} blocked · {plural(len(commits), 'commit')} "
+               f"· {plural(len(d['days']), 'active day')}  ")
+    out.append(f"Agents: {', '.join(d['agents']) or 'none'}  ")
+    out.append(f"Projects: {', '.join(d['projects']) or 'none'}")
     out.append("")
 
     if not entries:
         out += ["_Nothing logged in this period._", ""]
 
-    if len(projects) > 1:
+    if len(d["projects"]) > 1:
         out += ["## Summary", "", "| Project | Tasks | Done | Partial | Blocked |", "|---|---:|---:|---:|---:|"]
-        for p in projects:
+        for p in d["projects"]:
             pe = [e for e in entries if e["project"] == p]
-            out.append(f"| {clean(p)} | {len(pe)} | " + " | ".join(
+            out.append(f"| {p} | {len(pe)} | " + " | ".join(
                 str(sum(e["status"] == s_ for e in pe)) for s_ in STATUSES) + " |")
         out.append("")
 
-    for p in projects:
-        out += [f"## {clean(p)}", ""]
+    for p in d["projects"]:
+        out += [f"## {p}", ""]
         pe = [e for e in entries if e["project"] == p]
         for day in sorted({e["day"] for e in pe}):
-            out += [f"### {nice(day)}", ""]
+            out += [f"### {nice_day(day)}", ""]
             for e in (e for e in pe if e["day"] == day):
-                files = f"  \n  `{clean(e['files'])}`" if e["files"] else ""
-                out.append(f"- {icon[e['status']]} **{e['time']}** · _{e['agent']}_ — {clean(e['task'])}{files}")
+                files = f"  \n  `{e['files']}`" if e["files"] else ""
+                out.append(f"- {icon[e['status']]} **{e['time']}** · _{e['agent']}_ — {e['task']}{files}")
             out.append("")
 
     follow = [e for e in entries if e["follow-up"]]
     if follow:
         out += ["## 📌 Follow-ups", ""]
-        out += [f"- [ ] {clean(e['follow-up'])} _({clean(e['project'])}, {e['day']})_" for e in follow]
+        out += [f"- [ ] {e['follow-up']} _({e['project']}, {e['day']})_" for e in follow]
         out.append("")
 
     if commits:
         out += ["## 🔀 Commits", ""]
         for c in commits:
             tag = f"[{c['repo']}] " if mode == "global" else ""
-            out.append(f"- {c['day']} {c['time']} `{c['hash']}` {tag}{clean(c['msg'])}")
+            out.append(f"- {c['day']} {c['time']} `{c['hash']}` {tag}{c['msg']}")
         out.append("")
 
-    stamp = f"_Generated by Agent Ledger at {dt.datetime.now():%Y-%m-%d %H:%M}"
+    stamp = f"_Generated by Agent Ledger at {d['generated']}"
     out.append(stamp + (" · private details hidden_" if hide else "_"))
     return "\n".join(out) + "\n"
 
@@ -605,6 +634,8 @@ def cmd_report(args, week=False) -> None:
     ap.add_argument("--redact", action="store_true", help="hide emails, keys and home paths")
     ap.add_argument("--out", help="output file (default: <ledger>/reports/...)")
     ap.add_argument("--print", dest="show", action="store_true", help="also print the report")
+    ap.add_argument("--html", action="store_true", help="also save a formatted HTML page")
+    ap.add_argument("--open", action="store_true", help="open the HTML page in your browser (implies --html)")
     a = ap.parse_args(args)
 
     until = to_day("today" if week else a.until)
@@ -626,6 +657,218 @@ def cmd_report(args, week=False) -> None:
     if a.show:
         print(report)
     print(f"Wrote {short(out)}")
+    if a.html or a.open:
+        data = report_data(mode, logs, project, since, until, a.project, a.agent, a.redact)
+        page = out.with_suffix(".html")
+        page.write_text(build_html(data), encoding="utf-8")
+        print(f"Wrote {short(page)}")
+        if a.open:
+            open_file(page)
+
+
+# ---------------------------------------------------------------- html
+
+HTML_CSS = """
+:root{color-scheme:light;--bg:#f4f4f1;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--ink3:#76756f;
+--line:#e1e0d9;--chip:#efeee9;--good:#0ca30c;--warn:#fab219;--crit:#d03b3b;--accent:#b7791f;
+--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#121211;--surface:#1a1a19;--ink:#f0efec;
+--ink2:#c3c2b7;--ink3:#97968e;--line:#2c2c2a;--chip:#252523;--accent:#f5b942}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:40px 24px 64px}
+.brand{display:flex;align-items:center;gap:8px;color:var(--ink2);font-weight:600;font-size:14px}
+h1{font-size:32px;line-height:1.2;margin:14px 0 4px;letter-spacing:-.01em}
+.sub{color:var(--ink2);margin:0}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.chip{background:var(--chip);color:var(--ink2);border-radius:999px;padding:3px 12px;font-size:13px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin:28px 0 16px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.tile .n{font-size:28px;font-weight:700;line-height:1.1}
+.tile .l{color:var(--ink2);font-size:13px;display:flex;align-items:center;gap:6px}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
+.bar{display:flex;gap:2px;height:12px;margin:4px 0 8px}
+.bar span{border-radius:4px;min-width:4px;cursor:default}
+.legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--ink2);font-size:13px;margin-bottom:8px}
+.legend b{color:var(--ink);font-weight:600}
+.tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:28px 0 8px}
+.tools button{font:inherit;font-size:13px;background:var(--surface);color:var(--ink2);border:1px solid var(--line);
+border-radius:999px;padding:5px 14px;cursor:pointer}
+.tools button[aria-pressed=true]{background:var(--ink);color:var(--surface);border-color:var(--ink)}
+.tools input{font:inherit;font-size:14px;flex:1;min-width:180px;background:var(--surface);color:var(--ink);
+border:1px solid var(--line);border-radius:999px;padding:6px 14px}
+section{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin-top:16px}
+h2{font-size:19px;margin:0 0 4px;display:flex;justify-content:space-between;gap:12px;align-items:baseline}
+h2 small{color:var(--ink3);font-weight:500;font-size:13px}
+h3{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink3);margin:18px 0 6px}
+ul{list-style:none;margin:0;padding:0}
+.e{display:grid;grid-template-columns:96px 52px 1fr;gap:10px;padding:9px 0;border-top:1px solid var(--line)}
+.day .e:first-of-type{border-top:0}
+.pill{font-size:12px;font-weight:600;border-radius:6px;padding:2px 8px;height:fit-content;width:fit-content;white-space:nowrap}
+.DONE .pill{background:color-mix(in srgb,var(--good) 16%,transparent);color:var(--good)}
+.PARTIAL .pill{background:var(--warn);color:#0b0b0b}
+.BLOCKED .pill{background:color-mix(in srgb,var(--crit) 15%,transparent);color:var(--crit)}
+.t{color:var(--ink2);font-variant-numeric:tabular-nums;padding-top:1px}
+.task{font-weight:500}
+.agent{display:inline-block;background:var(--chip);color:var(--ink2);border-radius:6px;padding:0 7px;font-size:12px;margin-left:6px;font-weight:500}
+.files,.note{color:var(--ink3);font-size:13px;margin-top:2px}
+.files{font-family:var(--mono);font-size:12.5px}
+table{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}
+th{text-align:left;color:var(--ink3);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+th,td{padding:8px 10px 8px 0;border-top:1px solid var(--line)}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+code{font-family:var(--mono);font-size:12.5px;color:var(--accent)}
+.fu li{padding:6px 0;border-top:1px solid var(--line)}
+.fu li:first-child{border-top:0}
+.empty{color:var(--ink2);text-align:center;padding:40px}
+footer{color:var(--ink3);font-size:13px;margin-top:28px;text-align:center}
+#tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--surface);font-size:12px;padding:4px 8px;border-radius:6px;opacity:0;transition:opacity .1s}
+.hidden{display:none!important}
+.half{display:inline-block;width:9px;height:9px;border-radius:50%;border:1.5px solid currentColor;
+background:linear-gradient(90deg,currentColor 50%,transparent 50%);vertical-align:-1px;margin-right:4px}
+.tbl{overflow-x:auto}
+@media (max-width:640px){.e{grid-template-columns:84px 1fr}.e .t{display:none}}
+@media print{body{background:#fff}.tools,#tip{display:none}section,.tile{break-inside:avoid;border-color:#ddd}
+.wrap{padding:0}}
+"""
+
+HTML_JS = """
+const q=document.getElementById('q'),btns=[...document.querySelectorAll('.tools button')];let st='ALL';
+function apply(){const t=q.value.toLowerCase();
+ document.querySelectorAll('.e').forEach(li=>{li.classList.toggle('hidden',
+  (st!=='ALL'&&!li.classList.contains(st))||(t&&!li.textContent.toLowerCase().includes(t)))});
+ document.querySelectorAll('.day').forEach(d=>d.classList.toggle('hidden',!d.querySelector('.e:not(.hidden)')));
+ document.querySelectorAll('section.proj').forEach(s=>s.classList.toggle('hidden',!s.querySelector('.e:not(.hidden)')));}
+btns.forEach(b=>b.onclick=()=>{st=b.dataset.s;btns.forEach(x=>x.setAttribute('aria-pressed',x===b));apply()});
+q.oninput=apply;
+const tip=document.getElementById('tip');
+document.querySelectorAll('[data-tip]').forEach(el=>{
+ el.onmousemove=e=>{tip.textContent=el.dataset.tip;tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY+12)+'px';tip.style.opacity=1};
+ el.onmouseleave=()=>tip.style.opacity=0;});
+"""
+
+ICON_SVG = ('<svg width="18" height="22" viewBox="0 0 18 22" aria-hidden="true">'
+            '<rect width="18" height="22" rx="3" fill="#f5b942"/><rect x="3" width="2" height="22" fill="#c48c1e"/>'
+            '<rect x="8" y="7" width="7" height="1.6" rx=".8" fill="#78500a"/>'
+            '<rect x="8" y="10.5" width="7" height="1.6" rx=".8" fill="#78500a"/>'
+            '<rect x="8" y="14" width="7" height="1.6" rx=".8" fill="#78500a"/></svg>')
+
+STATUS_UI = {"DONE": ("Done", "var(--good)", "✓ "), "PARTIAL": ("Partial", "var(--warn)", "<i class='half'></i>"),
+             "BLOCKED": ("Blocked", "var(--crit)", "✕ ")}
+
+
+def build_html(d, title=None, daily=False) -> str:
+    from html import escape as esc
+    entries, commits, count = d["entries"], d["commits"], d["count"]
+    since, until = d["since"], d["until"]
+    heading = "Daily Digest" if daily else "Work Report"
+    title = title or (f"{heading} · {since} → {until}" if since != until else f"{heading} · {since}")
+    period = nice_day(since) if since == until else f"{nice_day(since)} – {nice_day(until)}"
+
+    h = ["<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>",
+         "<meta name='viewport' content='width=device-width,initial-scale=1'>",
+         f"<title>{esc(title)}</title><style>{HTML_CSS}</style></head><body><div class='wrap'>",
+         f"<div class='brand'>{ICON_SVG}Agent Ledger</div>",
+         f"<h1>{heading}</h1><p class='sub'>{esc(period)}</p><div class='chips'>"]
+    for label, val in (("Project", d["project_filter"]), ("Agent", d["agent_filter"])):
+        if val:
+            h.append(f"<span class='chip'>{label}: {esc(val)}</span>")
+    if d["agents"]:
+        h.append(f"<span class='chip'>Agents: {esc(', '.join(d['agents']))}</span>")
+    if d["projects"] and not d["project_filter"]:
+        h.append(f"<span class='chip'>{plural(len(d['projects']), 'project')}</span>")
+    if d["hide"]:
+        h.append("<span class='chip'>Private details hidden</span>")
+    h.append("</div>")
+
+    # stat tiles
+    tiles = [("Tasks", len(entries), None), ("Done", count["DONE"], "var(--good)"),
+             ("Partial", count["PARTIAL"], "var(--warn)"), ("Blocked", count["BLOCKED"], "var(--crit)"),
+             ("Commits", len(commits), None)] + ([] if daily else [("Active days", len(d["days"]), None)])
+    h.append("<div class='tiles'>")
+    for label, n, color in tiles:
+        dot = f"<span class='dot' style='background:{color}'></span>" if color else ""
+        h.append(f"<div class='tile'><div class='n'>{n}</div><div class='l'>{dot}{label}</div></div>")
+    h.append("</div>")
+
+    # status bar (single stacked bar, with legend + hover)
+    if entries:
+        h.append("<div class='bar' role='img' aria-label='Tasks by status'>")
+        for s_ in STATUSES:
+            if count[s_]:
+                pct = 100 * count[s_] / len(entries)
+                label = STATUS_UI[s_][0]
+                h.append(f"<span style='flex:{count[s_]};background:{STATUS_UI[s_][1]}' "
+                         f"data-tip='{label}: {count[s_]} of {len(entries)} ({pct:.0f}%)'></span>")
+        h.append("</div><div class='legend'>")
+        for s_ in STATUSES:
+            h.append(f"<span><span class='dot' style='background:{STATUS_UI[s_][1]}'></span> "
+                     f"{STATUS_UI[s_][0]} <b>{count[s_]}</b></span>")
+        h.append("</div>")
+
+        h.append("<div class='tools'><button data-s='ALL' aria-pressed='true'>All</button>"
+                 "<button data-s='DONE' aria-pressed='false'>Done</button>"
+                 "<button data-s='PARTIAL' aria-pressed='false'>Partial</button>"
+                 "<button data-s='BLOCKED' aria-pressed='false'>Blocked</button>"
+                 "<input id='q' type='search' placeholder='Search tasks, files, agents…'></div>")
+    else:
+        h.append("<section class='empty'>Nothing logged in this period.</section>")
+
+    # summary table
+    if len(d["projects"]) > 1:
+        h.append("<section><h2>Summary</h2><table><tr><th>Project</th><th class='num'>Tasks</th>"
+                 "<th class='num'>Done</th><th class='num'>Partial</th><th class='num'>Blocked</th></tr>")
+        for p in d["projects"]:
+            pe = [e for e in entries if e["project"] == p]
+            cells = "".join(f"<td class='num'>{sum(e['status'] == s_ for e in pe)}</td>" for s_ in STATUSES)
+            h.append(f"<tr><td>{esc(p)}</td><td class='num'>{len(pe)}</td>{cells}</tr>")
+        h.append("</table></section>")
+
+    # per project timeline
+    for p in d["projects"]:
+        pe = [e for e in entries if e["project"] == p]
+        done = sum(e["status"] == "DONE" for e in pe)
+        h.append(f"<section class='proj'><h2>{esc(p)}<small>{done} of {plural(len(pe), 'task')} done</small></h2>")
+        for day in sorted({e["day"] for e in pe}):
+            h.append(f"<div class='day'><h3>{esc(nice_day(day))}</h3><ul>")
+            for e in (e for e in pe if e["day"] == day):
+                extra = ""
+                if e["files"]:
+                    extra += f"<div class='files'>{esc(e['files'])}</div>"
+                for k, lab in (("notes", "Note"), ("follow-up", "Follow-up")):
+                    if e[k]:
+                        extra += f"<div class='note'>{lab}: {esc(e[k])}</div>"
+                h.append(f"<li class='e {e['status']}'><span class='pill'>{STATUS_UI[e['status']][2]}{STATUS_UI[e['status']][0]}</span>"
+                         f"<span class='t'>{esc(e['time'])}</span><div><span class='task'>{esc(e['task'])}</span>"
+                         f"<span class='agent'>{esc(e['agent'])}</span>{extra}</div></li>")
+            h.append("</ul></div>")
+        h.append("</section>")
+
+    follow = [e for e in entries if e["follow-up"]]
+    if follow:
+        h.append("<section><h2>Follow-ups</h2><ul class='fu'>")
+        h += [f"<li>☐ {esc(e['follow-up'])} <span class='agent'>{esc(e['project'])}</span></li>" for e in follow]
+        h.append("</ul></section>")
+
+    if commits:
+        h.append(f"<section><h2>Commits<small>{len(commits)}</small></h2><div class='tbl'><table>"
+                 "<tr><th>Date</th><th>Commit</th>" + ("<th>Repo</th>" if d["mode"] == "global" else "")
+                 + "<th>Message</th></tr>")
+        for c in commits:
+            repo = f"<td>{esc(c['repo'])}</td>" if d["mode"] == "global" else ""
+            h.append(f"<tr><td style='white-space:nowrap'>{esc(c['day'])} {esc(c['time'])}</td>"
+                     f"<td><code>{esc(c['hash'])}</code></td>{repo}<td style='min-width:220px'>{esc(c['msg'])}</td></tr>")
+        h.append("</table></div></section>")
+
+    h.append(f"<footer>Generated by Agent Ledger · {esc(d['generated'])}"
+             + (" · private details hidden" if d["hide"] else "") + "</footer>")
+    h.append(f"</div><div id='tip'></div><script>{HTML_JS if entries else ''}</script></body></html>")
+    return "".join(h)
+
+
+def open_file(path: Path) -> None:
+    import webbrowser
+    webbrowser.open(path.resolve().as_uri())
 
 
 # ---------------------------------------------------------------- log
