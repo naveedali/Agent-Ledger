@@ -45,7 +45,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 PROJECT_DIR_NAME = "ledger"
 GLOBAL_MARKER = ".agent-ledger-global"
