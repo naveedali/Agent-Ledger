@@ -22,6 +22,8 @@ Usage:
   python3 ledger.py update                  Refresh installed copies after you upgrade
   python3 ledger.py mcp                     Run as an MCP server (agents log through MCP tools)
   python3 ledger.py mcp-install             Add the MCP server to Cursor and Codex
+  python3 ledger.py git-hook install [REPO] Log commits that no agent logged (safety net)
+  python3 ledger.py git-hook uninstall [REPO]
   python3 ledger.py --version               Show the version
 
 DATE is YYYY-MM-DD, 'today' or 'yesterday'.
@@ -1071,6 +1073,95 @@ def cmd_hook(args) -> None:
         return
 
 
+# ---------------------------------------------------------------- commit safety net
+
+HOOK_BEGIN = "# >>> agent-ledger >>>"
+HOOK_END = "# <<< agent-ledger <<<"
+GIT_AGENT = "git"
+
+
+def git_out(repo: Path, *args) -> str:
+    try:
+        r = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, timeout=15)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def post_commit_hook(repo: Path) -> Path:
+    hooks = Path(git_out(repo, "rev-parse", "--git-path", "hooks") or ".git/hooks")
+    return (hooks if hooks.is_absolute() else repo / hooks) / "post-commit"
+
+
+def cmd_git_hook(args) -> None:
+    check_args(args, positional=2, cmd="git-hook")
+    action = args[0] if args else ""
+    if action not in ("install", "uninstall"):
+        sys.exit("Usage: ledger.py git-hook install|uninstall [REPO]")
+    locate()                                            # fail early if Agent Ledger isn't set up
+    repo = git_root(Path(args[1]).expanduser() if len(args) > 1 else Path.cwd())
+    if not repo:
+        sys.exit("Not inside a git repo. Run this in your project, or pass its path.")
+    hook = post_commit_hook(repo)
+    text = hook.read_text(encoding="utf-8") if hook.exists() else ""
+    if HOOK_BEGIN in text:                              # drop our old block, keep everything else
+        before, _, rest = text.partition(HOOK_BEGIN)
+        text = before.rstrip("\n") + rest.partition(HOOK_END)[2]
+    if action == "uninstall":
+        if text.strip() in ("", "#!/bin/sh"):
+            if hook.exists():
+                hook.unlink()
+        else:
+            hook.write_text(text.rstrip("\n") + "\n", encoding="utf-8")
+        print(f"Commit safety net removed from {repo.name}.")
+        return
+    script = str(Path(__file__).resolve())
+    block = (f"{HOOK_BEGIN}\n# Logs commits that no AI agent logged. Remove with: ledger.py git-hook uninstall\n"
+             f'python3 "{script}" commit-log >/dev/null 2>&1 || true\n{HOOK_END}\n')
+    if not text.strip():
+        text = "#!/bin/sh\n"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(text.rstrip("\n") + "\n\n" + block, encoding="utf-8")
+    hook.chmod(hook.stat().st_mode | 0o111)
+    print(f"Commit safety net on for {repo.name} ({short(hook)}).")
+    print("If you commit and no agent logged that work in the last 30 minutes, the commit is logged for you.")
+
+
+def recently_logged(logs: Path, repo: Path, minutes: int) -> bool:
+    now = dt.datetime.now()
+    since = now - dt.timedelta(minutes=minutes)
+    for e in collect(logs, str(since.date()), str(now.date())):
+        if e["agent"] == GIT_AGENT or e["time"] == "--:--":
+            continue
+        when = dt.datetime.fromisoformat(f"{e['day']}T{e['time']}")
+        same_repo = (e.get("repo") and Path(e["repo"]).expanduser().resolve() == repo.resolve()) \
+            or e["project"].lower() == repo.name.lower()
+        if same_repo and when >= since.replace(second=0, microsecond=0):
+            return True
+    return False
+
+
+def cmd_commit_log(args) -> None:
+    """Internal, run by the post-commit hook: log the commit if no agent logged recent work here."""
+    try:
+        repo = git_root(Path.cwd())
+        if not repo:
+            return
+        mode, logs, project = locate()
+        info = git_out(repo, "log", "-1", "--format=%h%x09%P%x09%s").split("\t")
+        if len(info) < 3 or len(info[1].split()) > 1:   # skip merge commits
+            return
+        minutes = int(os.environ.get("AGENT_LEDGER_COMMIT_WINDOW", "30"))
+        if recently_logged(logs, repo, minutes):
+            return
+        files = [f for f in git_out(repo, "show", "--name-only", "--format=", "HEAD").splitlines() if f]
+        shown = ", ".join(files[:5]) + (f" (+{len(files) - 5} more)" if len(files) > 5 else "")
+        add_entry(GIT_AGENT, f"Commit: {info[2]}", "DONE", shown, None,
+                  f"commit {info[0]}, logged by the git hook because no agent logged this work", "", str(repo))
+    except (Exception, SystemExit):
+        return                                          # a hook must never get in the way of a commit
+
+
 # ---------------------------------------------------------------- MCP server
 
 MCP_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -1339,6 +1430,12 @@ def cmd_status(args) -> None:
     hooked = has_claude_hook(*hook_files)
     print(f"    {ok if hooked else '·  '} {'Claude reminder':<15} "
           f"{'hook on (asks Claude to log if it forgets)' if hooked else 'hook off (optional, run init again)'}")
+    here_repo = git_root(Path.cwd())
+    if here_repo:
+        net = post_commit_hook(here_repo)
+        on = net.exists() and HOOK_BEGIN in net.read_text(encoding="utf-8", errors="ignore")
+        print(f"    {ok if on else '·  '} {'Commit net':<15} "
+              f"{'on for ' + here_repo.name if on else 'off for ' + here_repo.name + ' (optional: git-hook install)'}")
     if mode == "global":
         print(f"    ·  {'Cursor':<15} paste {short(logs / 'CURSOR_RULE.md')} into Settings → Rules → User Rules")
 
@@ -1410,6 +1507,10 @@ def main() -> None:
         cmd_update(rest)
     elif cmd == "mcp":
         cmd_mcp(rest)
+    elif cmd == "git-hook":
+        cmd_git_hook(rest)
+    elif cmd == "commit-log":
+        cmd_commit_log(rest)
     elif cmd == "mcp-install":
         cmd_mcp_install(rest)
     elif cmd == "_refresh":
