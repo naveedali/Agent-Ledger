@@ -174,6 +174,20 @@ agent-ledger git-hook install        # agent-ledger git-hook uninstall to remove
 
 After each commit, if no agent logged work for that repo in the last 30 minutes, an entry is added for agent `git` with the commit message and files. It never blocks or slows a commit, keeps any `post-commit` hook you already have, and skips merge commits. Set `AGENT_LEDGER_COMMIT_WINDOW` (minutes) to change the window.
 
+## Recover work nobody logged
+
+Claude Code and Codex keep a record of every session on your machine. `recover` reads those records and finds sessions that changed files but never made it into your ledger:
+
+```bash
+agent-ledger recover                   # preview today's missing work
+agent-ledger recover --date yesterday  # or any day
+agent-ledger recover --apply           # add it to your ledger
+```
+
+Each recovered entry uses the agent's own end-of-task summary, the files it changed (or the files in commits made during the session), and a note that it was recovered. Sessions that already logged, read-only sessions, and anything recovered before are skipped, so it's safe to run any time. Nothing leaves your machine.
+
+It reads `~/.codex/sessions` and `~/.claude/projects` (or `CODEX_HOME` and `CLAUDE_CONFIG_DIR` if you set them). Both formats belong to those tools and can change between versions, so treat this as a best-effort backup to logging, not a replacement.
+
 ## Reports for any date range
 
 For a weekly review, a client update or an invoice, build a report across several days:
@@ -222,6 +236,7 @@ The page has summary tiles, a status bar, every project's work grouped by day, f
 | `ledger.py mcp-install` | Add the MCP server to Cursor and Codex (prints the Claude Code command) |
 | `ledger.py mcp` | Run the MCP server (your agent starts this for you) |
 | `ledger.py git-hook install [repo]` | Log commits no agent logged (`uninstall` to remove) |
+| `ledger.py recover [--date DATE] [--apply]` | Find Claude Code / Codex sessions nobody logged; `--apply` adds them |
 | `ledger.py --version` | Show the version |
 
 ## Updating

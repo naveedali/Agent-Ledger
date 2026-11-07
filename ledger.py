@@ -24,6 +24,8 @@ Usage:
   python3 ledger.py mcp-install             Add the MCP server to Cursor and Codex
   python3 ledger.py git-hook install [REPO] Log commits that no agent logged (safety net)
   python3 ledger.py git-hook uninstall [REPO]
+  python3 ledger.py recover [--date DATE] [--apply]
+                                            Find Claude Code / Codex work nobody logged (--apply adds it)
   python3 ledger.py --version               Show the version
 
 DATE is YYYY-MM-DD, 'today' or 'yesterday'.
@@ -968,10 +970,11 @@ def one_line(s: str) -> str:
     return " ".join(str(s).split())
 
 
-def add_entry(agent, task, status="DONE", files="", project_name=None, notes="", follow_up="", repo=None):
-    """Append one entry to today's log for `agent`. Returns the log file's path."""
+def add_entry(agent, task, status="DONE", files="", project_name=None, notes="", follow_up="", repo=None,
+              when=None):
+    """Append one entry to the log for `agent` (today, or the day of `when`). Returns the file's path."""
     mode, logs, project = locate()
-    now = dt.datetime.now()
+    now = when or dt.datetime.now()
     status = str(status or "DONE").upper()
     if status not in STATUSES:
         raise ValueError(f"status must be one of {', '.join(STATUSES)}")
@@ -1160,6 +1163,183 @@ def cmd_commit_log(args) -> None:
                   f"commit {info[0]}, logged by the git hook because no agent logged this work", "", str(repo))
     except (Exception, SystemExit):
         return                                          # a hook must never get in the way of a commit
+
+
+# ---------------------------------------------------------------- recover from session files
+
+PATCH_FILE_RE = re.compile(r"\*\*\* (?:Update|Add|Delete) File: ([^\n\\`'\"]+)")
+# Shell commands that change files: in-place edits, copies/moves, redirects into a file, commits.
+WRITE_CMD_RE = re.compile(r"(?:\bsed\s+-i|\bperl\s+-pi|\btee\s|\bmv\s|\bcp\s|\brm\s|\bmkdir\s|\btouch\s|"
+                          r"\bgit\s+(?:commit|apply|am)\b|\bapply_patch\b|(?<![=\-<>&2])>>?\s*(?!/dev/null|&)[\w./~\"'-])")
+LEDGER_FILE_RE = re.compile(r"ledger/\d{4}-\d{2}-\d{2}/[\w-]+\.md")
+CLAUDE_EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+
+def local_time(ts):
+    try:
+        return dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def first_line(text, limit=110):
+    for line in str(text or "").splitlines():
+        line = re.sub(r"[*_`#>]+", "", line).strip(" -•")
+        if line and not line.startswith("<"):
+            return line if len(line) <= limit else line[:limit - 1].rstrip() + "…"
+    return ""
+
+
+def is_log_call(name, text):
+    """A log command, the MCP tool, or a hand-written append to a ledger file."""
+    text = str(text or "")
+    return ("log_work" in str(name or "") or bool(re.search(r"ledger\.py\S*\s+log\b", text))
+            or bool(LEDGER_FILE_RE.search(text)))
+
+
+def read_jsonl(path):
+    with open(path, encoding="utf-8", errors="ignore") as fh:
+        for raw in fh:
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                yield rec
+
+
+def codex_sessions(day: dt.date):
+    """Sessions from Codex rollout files: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl."""
+    root = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
+    for d in (day - dt.timedelta(days=1), day):          # a session can start before midnight
+        folder = root / f"{d:%Y}" / f"{d:%m}" / f"{d:%d}"
+        for f in sorted(folder.glob("*.jsonl")) if folder.is_dir() else []:
+            s = {"agent": "codex", "id": f.stem[-36:], "cwd": None, "edits": [], "files": [],
+                 "logged": False, "summary": "", "prompt": ""}
+            for r in read_jsonl(f):
+                p = r.get("payload") if isinstance(r.get("payload"), dict) else {}
+                kind, sub, when = r.get("type"), p.get("type"), local_time(r.get("timestamp"))
+                if kind in ("session_meta", "turn_context") and p.get("cwd"):
+                    s["cwd"] = p["cwd"]
+                elif sub in ("custom_tool_call", "function_call"):
+                    text = p.get("input") or p.get("arguments") or ""
+                    text = text if isinstance(text, str) else json.dumps(text)
+                    if is_log_call(p.get("name"), text):
+                        s["logged"] = True
+                    paths = PATCH_FILE_RE.findall(text)
+                    if paths and when:
+                        s["edits"].append(when)
+                        s["files"] += [x.strip() for x in paths]
+                    elif when and WRITE_CMD_RE.search(text):
+                        s["edits"].append(when)
+                elif sub == "task_complete" and p.get("last_agent_message"):
+                    s["summary"] = p["last_agent_message"]
+                elif sub == "message" and p.get("role") == "user" and not s["prompt"]:
+                    for c in p.get("content") or []:
+                        if isinstance(c, dict) and first_line(c.get("text")):
+                            s["prompt"] = c.get("text")
+                            break
+            yield s
+
+
+def claude_sessions(day: dt.date):
+    """Sessions from Claude Code transcripts: ~/.claude/projects/<project>/<session>.jsonl."""
+    roots = os.environ.get("CLAUDE_CONFIG_DIR")
+    roots = [Path(r) for r in roots.split(",")] if roots else [Path.home() / ".claude"]
+    for root in roots:
+        projects = root / "projects"
+        for f in sorted(projects.glob("*/*.jsonl")) if projects.is_dir() else []:
+            if dt.date.fromtimestamp(f.stat().st_mtime) < day:
+                continue                                 # untouched since before that day
+            s = {"agent": "claude", "id": f.stem, "cwd": None, "edits": [], "files": [],
+                 "logged": False, "summary": "", "prompt": ""}
+            for r in read_jsonl(f):
+                if r.get("cwd"):
+                    s["cwd"] = r["cwd"]
+                if r.get("type") == "summary" and r.get("summary"):
+                    s["summary"] = r["summary"]
+                msg = r.get("message") if isinstance(r.get("message"), dict) else {}
+                content, when = msg.get("content"), local_time(r.get("timestamp"))
+                if r.get("type") == "user" and not s["prompt"]:
+                    if isinstance(content, str):
+                        s["prompt"] = content
+                    elif isinstance(content, list):
+                        s["prompt"] = next((c.get("text") for c in content if isinstance(c, dict)
+                                            and c.get("type") == "text"), "") or ""
+                for c in content if isinstance(content, list) else []:
+                    if not isinstance(c, dict) or c.get("type") != "tool_use":
+                        continue
+                    name, inp = c.get("name"), c.get("input") or {}
+                    if is_log_call(name, inp.get("command")) or is_log_call("", inp.get("file_path")):
+                        s["logged"] = True
+                    elif name == "Bash" and when and WRITE_CMD_RE.search(str(inp.get("command", ""))):
+                        s["edits"].append(when)
+                    elif name in CLAUDE_EDIT_TOOLS and when:
+                        target = inp.get("file_path") or inp.get("notebook_path")
+                        if target:
+                            s["edits"].append(when)
+                            s["files"].append(str(target))
+            yield s
+
+
+def find_unlogged(day: dt.date, logs: Path):
+    """Sessions with file edits on `day` that no agent logged, and that weren't recovered already."""
+    already = ""
+    day_dir = logs / str(day)
+    if day_dir.is_dir():
+        already = "".join(f.read_text(encoding="utf-8", errors="ignore") for f in day_dir.glob("*.md"))
+    logs_str = str(logs.resolve())
+    found = []
+    for s in list(codex_sessions(day)) + list(claude_sessions(day)):
+        cwd = Path(s["cwd"]).expanduser() if s["cwd"] else None
+        edits = [w for w in s["edits"] if w.date() == day]
+        files = []
+        for f in s["files"]:
+            full = (cwd / f) if cwd and not Path(f).is_absolute() else Path(f)
+            if not str(full).startswith(logs_str) and Path(f).name not in files:
+                files.append(Path(f).name)
+        if s["logged"] or not edits or f"session {s['id'][:8]}" in already:
+            continue
+        repo = git_root(cwd) if cwd and cwd.is_dir() else None
+        if not files and repo:                      # changed through the shell: ask git what changed
+            since = min(edits) - dt.timedelta(minutes=5)
+            until = max(edits) + dt.timedelta(minutes=30)
+            out = git_out(repo, "log", f"--since={since:%Y-%m-%d %H:%M}", f"--until={until:%Y-%m-%d %H:%M}",
+                          "--name-only", "--format=")
+            for f in out.splitlines():
+                if f and Path(f).name not in files:
+                    files.append(Path(f).name)
+        task = (first_line(s["summary"]) or first_line(s["prompt"])
+                or ("Changes in " + ", ".join(files[:3]) if files else "Work in " + (cwd.name if cwd else "a session")))
+        found.append({"agent": s["agent"], "id": s["id"], "when": max(edits), "task": task,
+                      "files": files, "repo": repo or cwd,
+                      "project": (repo or cwd).name if (repo or cwd) else "-"})
+    return sorted(found, key=lambda x: x["when"])
+
+
+def cmd_recover(args) -> None:
+    check_args(args, flags=("--apply",), value_flags=("--date",), cmd="recover")
+    mode, logs, project = locate()
+    day = dt.date.fromisoformat(parse_date(args))
+    found = find_unlogged(day, logs)
+    if not found:
+        print(f"Nothing to recover for {day}: every Claude Code and Codex session with edits was logged.")
+        return
+    print(f"{plural(len(found), 'session')} on {day} changed files but weren't logged:\n")
+    for x in found:
+        files = ", ".join(x["files"][:5]) + (f" (+{len(x['files']) - 5} more)" if len(x["files"]) > 5 else "")
+        print(f"  {x['when']:%H:%M} · {x['project']} · {x['agent']} — {x['task']}")
+        if files:
+            print(f"           {files}")
+    if "--apply" not in args:
+        print("\nThis was a preview. Add --apply to put these in your ledger.")
+        return
+    for x in found:
+        files = ", ".join(x["files"][:5]) + (f" (+{len(x['files']) - 5} more)" if len(x["files"]) > 5 else "")
+        add_entry(x["agent"], x["task"], "DONE", files, x["project"],
+                  f"recovered from {x['agent']} session {x['id'][:8]} (not logged at the time)", "",
+                  str(x["repo"]) if x["repo"] else None, when=x["when"])
+    print(f"\nAdded {plural(len(found), 'entry')} to your ledger.".replace("entrys", "entries"))
 
 
 # ---------------------------------------------------------------- MCP server
@@ -1509,6 +1689,8 @@ def main() -> None:
         cmd_mcp(rest)
     elif cmd == "git-hook":
         cmd_git_hook(rest)
+    elif cmd == "recover":
+        cmd_recover(rest)
     elif cmd == "commit-log":
         cmd_commit_log(rest)
     elif cmd == "mcp-install":
