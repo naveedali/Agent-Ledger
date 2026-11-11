@@ -407,12 +407,33 @@ def locate():
     sys.exit("No ledger found. Run:  python3 ledger.py init")
 
 
+_WARNED = set()
+
+
+def read_log(path: Path) -> str:
+    """Read a log file without ever failing on its bytes.
+
+    Logs are often written by hand or by other tools: a byte-order mark (Windows Notepad adds one)
+    is dropped, and bytes that aren't UTF-8 become "�" with a one-time warning naming the file,
+    so one odd file can't stop the digest, reports or status from working.
+    """
+    data = path.read_bytes()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        if path not in _WARNED:
+            _WARNED.add(path)
+            print(f"Warning: {short(path)} has characters that aren't UTF-8; they're shown as �. "
+                  "Re-save the file as UTF-8 to fix it.", file=sys.stderr)
+        return data.decode("utf-8-sig", errors="replace")
+
+
 def parse_log(path: Path):
     """Read one agent's log file into a list of entries."""
     agent = path.stem
     entries, current = [], None
     blank = {"task": "", "files": "", "notes": "", "follow-up": "", "repo": "", "client": "", "time_spent": ""}
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in read_log(path).splitlines():
         line = raw.strip()
         m = HEADING_RE.match(line)
         if m:

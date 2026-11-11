@@ -240,6 +240,40 @@ class TestReports(LedgerTestCase):
         self.assertNotEqual(r.returncode, 0)
 
 
+class TestOddLogFiles(LedgerTestCase):
+    """Hand-edited or tool-written log files must never break the digest, reports or status."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init", "--global")
+        self.script = self.gl / "ledger.py"
+        day = self.gl / TODAY
+        day.mkdir(parents=True, exist_ok=True)
+        (day / "claude.md").write_text("## 08:00 · app · DONE\n- Task: Normal entry\n", encoding="utf-8")
+        # Windows Notepad: byte-order mark + CRLF line endings
+        (day / "gemini.md").write_bytes("﻿## 09:15 · app · PARTIAL\r\n- Task: Notepad entry\r\n"
+                                        "- Follow-up: Finish it\r\n".encode("utf-8"))
+        # Not UTF-8 at all (Latin-1 bytes)
+        (day / "codex.md").write_bytes(b"## 10:00 \xc2\xb7 app \xc2\xb7 DONE\n- Task: Caf\xe9 menu \xff\n")
+
+    def test_bom_crlf_entry_is_read(self):
+        out = self.run_cli("today", script=self.script).stdout
+        self.assertIn("Notepad entry", out)
+        self.assertIn("Finish it", out)
+        self.assertIn("3 tasks", out)
+
+    def test_invalid_utf8_warns_instead_of_crashing(self):
+        for cmd in (["today"], ["compile"], ["report", "--print"], ["week", "--print", "--html"],
+                    ["standup"], ["status"]):
+            r = self.run_cli(*cmd, script=self.script)               # exit code 0, no traceback
+            self.assertNotIn("Traceback", r.stderr, cmd)
+        r = self.run_cli("today", script=self.script)
+        self.assertIn("Normal entry", r.stdout)                       # other agents' work is still there
+        self.assertIn("Caf� menu", r.stdout)                     # the odd entry too, bytes shown as �
+        self.assertIn("codex.md", r.stderr)                           # with a warning naming the file
+        self.assertEqual(r.stderr.count("Warning"), 1)                # once, not once per read
+
+
 class TestProjectMode(LedgerTestCase):
     def test_private_setup_leaves_git_clean(self):
         repo = self.git_repo("app")
