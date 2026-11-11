@@ -146,18 +146,24 @@ Agents that support [MCP](https://modelcontextprotocol.io) can log through a rea
 agent-ledger mcp-install
 ```
 
-This adds the server to **Cursor** (`~/.cursor/mcp.json`) and **Codex** (`~/.codex/config.toml`), keeping what's already there, and prints the one command to add it to **Claude Code**:
+What it sets up depends on your mode, and it always keeps what's already in those files:
 
-```bash
-claude mcp add --scope user agent-ledger -- python3 "/path/to/ledger.py" mcp
-```
+- **Global mode:** adds the server for every project, to **Cursor** (`~/.cursor/mcp.json`) and **Codex** (`~/.codex/config.toml`), and prints the one command to add it to **Claude Code**:
+
+  ```bash
+  claude mcp add --scope user agent-ledger -- python3 "/path/to/ledger.py" mcp
+  ```
+
+- **Project mode:** adds the server to this project only, in `.cursor/mcp.json` for **Cursor** and `.mcp.json` for **Claude Code** (it asks you to approve it the first time). Other repos never log into this project's ledger. With `--private`, both files stay out of git. Codex has no per-project MCP setting, so it keeps logging through the `AGENTS.md` rule.
+
+Set up the MCP server in project mode with an earlier version? Run `mcp-install` again in that project: it removes the old user-level entry, which sent every repo's work into that project.
 
 Restart your agents and they get five tools:
 
 | Tool | What it does |
 |---|---|
 | `log_work` | Add an entry to today's log (same fields as `ledger.py log`) |
-| `daily_digest` | Today's (or any day's) digest |
+| `daily_digest` | Today's (or any day's) digest, with a `redact` option |
 | `work_report` | A report for a date range, with `project`, `agent` and `redact` options |
 | `standup` | Yesterday / Today / Blockers |
 | `ledger_status` | Check the setup |
@@ -265,7 +271,7 @@ The page has summary tiles, a status bar, an **Activity** chart (tasks per day b
 | `ledger.py init --project [folder] [--private]` | Project mode |
 | `ledger.py init ... --no-hook` | Set up without the Claude Code log reminder |
 | `ledger.py log --agent NAME --task "..."` | Add an entry (agents run this). Options: `--files`, `--status`, `--follow-up`, `--notes`, `--project`, `--client`, `--time` |
-| `ledger.py today` | Build today's digest and print it |
+| `ledger.py today` | Build today's digest and print it. Add `--redact` before pasting it anywhere |
 | `ledger.py compile` | Build today's digest (saves `DIGEST.md`) |
 | `ledger.py compile --date yesterday` | Another day (`yesterday` or `YYYY-MM-DD`) |
 | `ledger.py today --open` | Today's digest as a web page (`--html` saves it without opening) |
@@ -275,7 +281,7 @@ The page has summary tiles, a status bar, an **Activity** chart (tasks per day b
 | `ledger.py report --from DATE --to DATE` | Report for any date range. Options: `--client`, `--project`, `--agent`, `--redact`, `--html`, `--open`, `--print`, `--out` |
 | `ledger.py status` | Check the setup and see why nothing was logged |
 | `ledger.py update` | Refresh installed copies and rules after upgrading |
-| `ledger.py mcp-install` | Add the MCP server to Cursor and Codex (prints the Claude Code command) |
+| `ledger.py mcp-install` | Add the MCP server: user-level for Cursor and Codex in global mode, project-level for Cursor and Claude Code in project mode |
 | `ledger.py mcp` | Run the MCP server (your agent starts this for you) |
 | `ledger.py git-hook install [repo]` | Log commits no agent logged (`uninstall` to remove) |
 | `ledger.py recover [--date DATE] [--apply]` | Find Claude Code / Codex sessions nobody logged; `--apply` adds them |

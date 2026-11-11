@@ -204,6 +204,20 @@ class TestReports(LedgerTestCase):
             self.assertNotIn("/Users/someone", text)
             self.assertIn("[email]", text)
 
+    def test_digest_redact_hides_private_details_in_printed_and_saved_md(self):
+        for cmd in (["today", "--date", "yesterday", "--redact"], ["compile", "--date", "yesterday", "--redact"]):
+            out = self.run_cli(*cmd, script=self.script).stdout
+            saved = (self.gl / str(dt.date.today() - dt.timedelta(days=1)) / "DIGEST.md").read_text()
+            for text in ((out, saved) if cmd[0] == "today" else (saved,)):
+                self.assertNotIn("dev@example.com", text)
+                self.assertNotIn("/Users/someone", text)
+                self.assertIn("[email]", text)
+        out = self.run_cli("today", "--redact", script=self.script).stdout
+        self.assertNotIn("sk_live_", out)
+        self.assertIn("[secret]", out)
+        out = self.run_cli("today", "--date", "yesterday", script=self.script).stdout
+        self.assertIn("dev@example.com", out)                          # without --redact: full details
+
     def test_digest_html(self):
         self.run_cli("today", "--html", script=self.script)
         page = (self.gl / TODAY / "DIGEST.html").read_text()
@@ -226,6 +240,40 @@ class TestReports(LedgerTestCase):
         self.assertNotEqual(r.returncode, 0)
 
 
+class TestOddLogFiles(LedgerTestCase):
+    """Hand-edited or tool-written log files must never break the digest, reports or status."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init", "--global")
+        self.script = self.gl / "ledger.py"
+        day = self.gl / TODAY
+        day.mkdir(parents=True, exist_ok=True)
+        (day / "claude.md").write_text("## 08:00 · app · DONE\n- Task: Normal entry\n", encoding="utf-8")
+        # Windows Notepad: byte-order mark + CRLF line endings
+        (day / "gemini.md").write_bytes("﻿## 09:15 · app · PARTIAL\r\n- Task: Notepad entry\r\n"
+                                        "- Follow-up: Finish it\r\n".encode("utf-8"))
+        # Not UTF-8 at all (Latin-1 bytes)
+        (day / "codex.md").write_bytes(b"## 10:00 \xc2\xb7 app \xc2\xb7 DONE\n- Task: Caf\xe9 menu \xff\n")
+
+    def test_bom_crlf_entry_is_read(self):
+        out = self.run_cli("today", script=self.script).stdout
+        self.assertIn("Notepad entry", out)
+        self.assertIn("Finish it", out)
+        self.assertIn("3 tasks", out)
+
+    def test_invalid_utf8_warns_instead_of_crashing(self):
+        for cmd in (["today"], ["compile"], ["report", "--print"], ["week", "--print", "--html"],
+                    ["standup"], ["status"]):
+            r = self.run_cli(*cmd, script=self.script)               # exit code 0, no traceback
+            self.assertNotIn("Traceback", r.stderr, cmd)
+        r = self.run_cli("today", script=self.script)
+        self.assertIn("Normal entry", r.stdout)                       # other agents' work is still there
+        self.assertIn("Caf� menu", r.stdout)                     # the odd entry too, bytes shown as �
+        self.assertIn("codex.md", r.stderr)                           # with a warning naming the file
+        self.assertEqual(r.stderr.count("Warning"), 1)                # once, not once per read
+
+
 class TestProjectMode(LedgerTestCase):
     def test_private_setup_leaves_git_clean(self):
         repo = self.git_repo("app")
@@ -237,6 +285,67 @@ class TestProjectMode(LedgerTestCase):
         self.assertEqual(status, "")
         settings = json.loads((repo / ".claude" / "settings.local.json").read_text())
         self.assertIn("$CLAUDE_PROJECT_DIR", settings["hooks"]["Stop"][0]["hooks"][0]["command"])
+
+
+class TestMcpInstall(LedgerTestCase):
+    def test_project_mode_writes_project_config_only(self):
+        repo = self.git_repo("client-a")
+        self.run_cli("init", "--project", str(repo))
+        out = self.run_cli("mcp-install", script=repo / "ledger" / "ledger.py", cwd=repo).stdout
+        self.assertIn("project mode", out)
+        cursor = json.loads((repo / ".cursor" / "mcp.json").read_text())["mcpServers"]["agent-ledger"]
+        self.assertEqual(cursor["args"], ["${workspaceFolder}/ledger/ledger.py", "mcp"])
+        claude = json.loads((repo / ".mcp.json").read_text())["mcpServers"]["agent-ledger"]
+        self.assertEqual(claude["args"], ["${CLAUDE_PROJECT_DIR:-.}/ledger/ledger.py", "mcp"])
+        self.assertNotIn(str(self.home), json.dumps([cursor, claude]))      # nothing machine-specific
+        # The user-level configs, shared by every repo, are left alone.
+        self.assertFalse((self.home / ".cursor" / "mcp.json").exists())
+        self.assertFalse((self.home / ".codex" / "config.toml").exists())
+        self.assertNotIn("--scope user agent-ledger -- python3", out)
+        self.run_cli("mcp-install", script=repo / "ledger" / "ledger.py", cwd=repo)   # safe to repeat
+
+    def test_private_project_keeps_git_clean(self):
+        repo = self.git_repo("client-b")
+        self.run_cli("init", "--project", str(repo), "--private")
+        self.run_cli("mcp-install", script=repo / "ledger" / "ledger.py", cwd=repo)
+        status = subprocess.run(["git", "status", "--short"], cwd=repo, env=self.env,
+                                capture_output=True, text=True).stdout
+        self.assertEqual(status, "")
+        self.assertTrue((repo / ".mcp.json").exists())
+
+    def test_project_mode_removes_old_user_level_entry(self):
+        repo = self.git_repo("client-c")
+        self.run_cli("init", "--project", str(repo))
+        old = str(repo / "ledger" / "ledger.py")                # what 0.4.2 wrote at user level
+        cursor = self.home / ".cursor" / "mcp.json"
+        cursor.parent.mkdir(parents=True)
+        cursor.write_text(json.dumps({"mcpServers": {"other": {"command": "x"},
+                                                     "agent-ledger": {"command": "python3", "args": [old, "mcp"]}}}))
+        codex = self.home / ".codex" / "config.toml"
+        codex.parent.mkdir(parents=True)
+        codex.write_text(f'model = "o4"\n\n[mcp_servers.agent-ledger]\ncommand = "python3"\n'
+                         f'args = [{json.dumps(old)}, "mcp"]\n\n[mcp_servers.other]\ncommand = "y"\n')
+        out = self.run_cli("mcp-install", script=repo / "ledger" / "ledger.py", cwd=repo).stdout
+        self.assertIn("Removed an old user-level entry", out)
+        self.assertEqual(set(json.loads(cursor.read_text())["mcpServers"]), {"other"})
+        text = codex.read_text()
+        self.assertNotIn("agent-ledger", text)
+        self.assertIn('model = "o4"', text)
+        self.assertIn("[mcp_servers.other]", text)
+
+    def test_global_mode_replaces_stale_codex_entry_and_uses_global_copy(self):
+        self.run_cli("init", "--global")
+        codex = self.home / ".codex" / "config.toml"
+        codex.parent.mkdir(parents=True, exist_ok=True)
+        codex.write_text('[mcp_servers.agent-ledger]\ncommand = "python3"\nargs = ["/old/app/ledger/ledger.py", "mcp"]\n')
+        out = self.run_cli("mcp-install").stdout                 # run from the repo copy, not ~/agent-ledger
+        self.assertIn("global mode", out)
+        text = codex.read_text()
+        self.assertEqual(text.count("[mcp_servers.agent-ledger]"), 1)
+        self.assertNotIn("/old/app", text)
+        self.assertIn(json.dumps(str(self.gl / "ledger.py")), text)
+        cursor = json.loads((self.home / ".cursor" / "mcp.json").read_text())["mcpServers"]["agent-ledger"]
+        self.assertEqual(cursor["args"], [str(self.gl / "ledger.py"), "mcp"])
 
 
 class TestUpdate(LedgerTestCase):
@@ -288,6 +397,17 @@ class TestMcp(LedgerTestCase):
         self.assertIn("1 task", digest)
         self.assertIn("client-app", digest)           # project taken from the server's repo
         self.assertIn("Docs", digest)
+
+    def test_daily_digest_redact(self):
+        r = self.rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                          "name": "log_work", "arguments": {"agent": "cursor", "task": "Mailed ana@example.com"}}},
+                     {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                      "params": {"name": "daily_digest", "arguments": {"redact": True}}},
+                     {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                      "params": {"name": "daily_digest", "arguments": {}}})
+        self.assertNotIn("ana@example.com", r[2]["result"]["content"][0]["text"])
+        self.assertIn("[email]", r[2]["result"]["content"][0]["text"])
+        self.assertIn("ana@example.com", r[3]["result"]["content"][0]["text"])
 
     def test_errors_are_reported_not_fatal(self):
         r = self.rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",

@@ -9,8 +9,9 @@ Usage:
         add --no-hook to skip the Claude Code log reminder
   python3 ledger.py today  [--date DATE]    Build the digest and print it
   python3 ledger.py compile [--date DATE]   Build the digest (saves DIGEST.md)
-        add --html to also save DIGEST.html, --open to open it in your browser
-  python3 ledger.py status                  Check the setup / why nothing was logged
+        add --html to also save DIGEST.html, --open to open it in your browser,
+        --redact to hide emails, keys and home-folder paths
+  python3 ledger.py status                 Check the setup / why nothing was logged
   python3 ledger.py log --agent NAME --task "..." [--files ...] [--status PARTIAL|BLOCKED]
                         [--client NAME] [--time 1h30m]
                                             Add an entry to today's log (used by agents)
@@ -25,7 +26,7 @@ Usage:
 
   python3 ledger.py update                  Refresh installed copies after you upgrade
   python3 ledger.py mcp                     Run as an MCP server (agents log through MCP tools)
-  python3 ledger.py mcp-install             Add the MCP server to Cursor and Codex
+  python3 ledger.py mcp-install             Add the MCP server (user-level in global mode, this project only in project mode)
   python3 ledger.py git-hook install [REPO] Log commits that no agent logged (safety net)
   python3 ledger.py git-hook uninstall [REPO]
   python3 ledger.py recover [--date DATE] [--apply]
@@ -45,7 +46,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 PROJECT_DIR_NAME = "ledger"
 GLOBAL_MARKER = ".agent-ledger-global"
@@ -406,12 +407,33 @@ def locate():
     sys.exit("No ledger found. Run:  python3 ledger.py init")
 
 
+_WARNED = set()
+
+
+def read_log(path: Path) -> str:
+    """Read a log file without ever failing on its bytes.
+
+    Logs are often written by hand or by other tools: a byte-order mark (Windows Notepad adds one)
+    is dropped, and bytes that aren't UTF-8 become "�" with a one-time warning naming the file,
+    so one odd file can't stop the digest, reports or status from working.
+    """
+    data = path.read_bytes()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        if path not in _WARNED:
+            _WARNED.add(path)
+            print(f"Warning: {short(path)} has characters that aren't UTF-8; they're shown as �. "
+                  "Re-save the file as UTF-8 to fix it.", file=sys.stderr)
+        return data.decode("utf-8-sig", errors="replace")
+
+
 def parse_log(path: Path):
     """Read one agent's log file into a list of entries."""
     agent = path.stem
     entries, current = [], None
     blank = {"task": "", "files": "", "notes": "", "follow-up": "", "repo": "", "client": "", "time_spent": ""}
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in read_log(path).splitlines():
         line = raw.strip()
         m = HEADING_RE.match(line)
         if m:
@@ -566,6 +588,8 @@ def cmd_compile(args, show=False) -> None:
     day_dir = logs / day
     day_dir.mkdir(parents=True, exist_ok=True)
     digest = build_digest(mode, logs, project, day)
+    if "--redact" in args:                       # same as the HTML page and reports: nothing private
+        digest = redact(digest)
     (day_dir / "DIGEST.md").write_text(digest, encoding="utf-8")
     print(digest if show else f"Wrote {short(day_dir / 'DIGEST.md')}")
     if "--html" in args or "--open" in args:
@@ -1641,7 +1665,9 @@ MCP_TOOLS = [
     {"name": "daily_digest",
      "description": "The Agent Ledger digest for one day: tasks done, partial or blocked, follow-ups "
                     "and git commits. Use it when the user asks what was done today.",
-     "inputSchema": {"type": "object", "properties": {"date": _DATE}}},
+     "inputSchema": {"type": "object", "properties": {
+         "date": _DATE,
+         "redact": {"type": "boolean", "description": "Hide emails, keys and home paths", "default": False}}}},
     {"name": "work_report",
      "description": "An Agent Ledger work report for a date range (default: the last 7 days), "
                     "grouped by project and day.",
@@ -1674,7 +1700,8 @@ def mcp_call(name: str, a: dict) -> str:
                          client=a.get("client", ""), time_spent=a.get("time", ""))
         return f"Logged to {short(path)}"
     if name == "daily_digest":
-        return build_digest(mode, logs, project, to_day(a.get("date") or "today"))
+        digest = build_digest(mode, logs, project, to_day(a.get("date") or "today"))
+        return redact(digest) if a.get("redact") else digest
     if name == "work_report":
         until = to_day(a.get("to") or "today")
         since = to_day(a["from"]) if a.get("from") else str(dt.date.fromisoformat(until) - dt.timedelta(days=6))
@@ -1741,42 +1768,167 @@ def cmd_mcp(args) -> None:
             send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": str(e)}})
 
 
-def cmd_mcp_install(args) -> None:
-    """Register the MCP server with Cursor and Codex, and show the Claude Code command."""
-    check_args(args, cmd="mcp-install")
-    locate()                                           # fail early if Agent Ledger isn't set up
-    script = str(Path(__file__).resolve())
-    print("Agent Ledger MCP server\n")
+MCP_NAME = "agent-ledger"
+CODEX_TABLE = f"[mcp_servers.{MCP_NAME}]"
 
+
+def project_ledger_script(path) -> bool:
+    """True when `path` is the ledger.py copy inside a project's ledger/ folder (not the global one)."""
+    try:
+        p = Path(str(path)).expanduser()
+    except (TypeError, ValueError):
+        return False
+    return (p.name == "ledger.py" and p.parent.name == PROJECT_DIR_NAME
+            and not (p.parent / GLOBAL_MARKER).exists())
+
+
+def drop_codex_table(text: str) -> str:
+    """Remove the [mcp_servers.agent-ledger] table (and its sub-tables) from a Codex config.toml."""
+    out, skip = [], False
+    for line in text.splitlines(keepends=True):
+        head = line.strip()
+        if head.startswith("["):
+            skip = head == CODEX_TABLE or head.startswith(f"[mcp_servers.{MCP_NAME}.")
+        if not skip:
+            out.append(line)
+    return "".join(out).rstrip("\n") + ("\n" if out else "")
+
+
+def set_json_server(path: Path, entry):
+    """Add, update or (entry=None) remove the agent-ledger server in an mcp.json. Returns what changed."""
+    data = json.loads(path.read_text(encoding="utf-8") or "{}") if path.exists() else {}
+    if not isinstance(data, dict) or not isinstance(data.setdefault("mcpServers", {}), dict):
+        raise ValueError("not an mcp.json")
+    old = data["mcpServers"].get(MCP_NAME)
+    if entry is None:
+        if old is None:
+            return None
+        del data["mcpServers"][MCP_NAME]
+        state = "removed"
+    else:
+        if old == entry:
+            return "already set"
+        data["mcpServers"][MCP_NAME] = entry
+        state = "updated" if old is not None else "added"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return state
+
+
+def user_entry_points_at_project(path: Path, toml: bool) -> bool:
+    """Does the user-level config register a project's ledger? (Older versions did: every repo then
+    logged into that one project.)"""
+    try:
+        if not path.exists():
+            return False
+        if toml:
+            text = path.read_text(encoding="utf-8")
+            if CODEX_TABLE not in text:
+                return False
+            block = text.split(CODEX_TABLE, 1)[1].split("\n[", 1)[0]
+            return any(project_ledger_script(p) for p in re.findall(r'"([^"]+ledger\.py)"', block))
+        entry = json.loads(path.read_text(encoding="utf-8")).get("mcpServers", {}).get(MCP_NAME) or {}
+        return any(project_ledger_script(a) for a in entry.get("args", []))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def cmd_mcp_install(args) -> None:
+    """Register the MCP server where it belongs.
+
+    Global mode: user-level config for Cursor and Codex (every project logs to ~/agent-ledger).
+    Project mode: project-level config only (.cursor/mcp.json and .mcp.json in the repo), so the
+    server is used when that project is open and other repos never log into it.
+    """
+    check_args(args, cmd="mcp-install")
+    mode, logs, project = locate()                     # also fails early if Agent Ledger isn't set up
+    print(f"Agent Ledger MCP server ({mode} mode)\n")
+    if mode == "project":
+        mcp_install_project(project)
+    else:
+        script = logs / "ledger.py"
+        mcp_install_global(str(script if script.exists() else Path(__file__).resolve()))
+    print("\nRestart your agents, then they can call the log_work tool.")
+
+
+def mcp_install_global(script: str) -> None:
     cursor = Path.home() / ".cursor" / "mcp.json"
     try:
-        data = json.loads(cursor.read_text(encoding="utf-8")) if cursor.exists() else {}
-        if not isinstance(data, dict) or not isinstance(data.setdefault("mcpServers", {}), dict):
-            raise ValueError
-        state = "updated" if "agent-ledger" in data["mcpServers"] else "added"
-        data["mcpServers"]["agent-ledger"] = {"command": "python3", "args": [script, "mcp"]}
-        cursor.parent.mkdir(parents=True, exist_ok=True)
-        cursor.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        state = set_json_server(cursor, {"command": "python3", "args": [script, "mcp"]})
         print(f"  Cursor       {short(cursor):<28} {state}")
     except (OSError, ValueError):
         print(f"  Cursor       {short(cursor):<28} skipped (couldn't read it; add the server by hand)")
 
     codex = Path.home() / ".codex" / "config.toml"
-    block = f'\n[mcp_servers.agent-ledger]\ncommand = "python3"\nargs = [{json.dumps(script)}, "mcp"]\n'
+    block = f'{CODEX_TABLE}\ncommand = "python3"\nargs = [{json.dumps(script)}, "mcp"]\n'
     try:
         text = codex.read_text(encoding="utf-8") if codex.exists() else ""
-        if "[mcp_servers.agent-ledger]" in text:
-            print(f"  Codex        {short(codex):<28} already there")
+        if block in text:
+            state = "already set"
         else:
+            state = "updated" if CODEX_TABLE in text else "added"
+            rest = drop_codex_table(text)
             codex.parent.mkdir(parents=True, exist_ok=True)
-            codex.write_text(text + ("\n" if text and not text.endswith("\n") else "") + block, encoding="utf-8")
-            print(f"  Codex        {short(codex):<28} added")
+            codex.write_text(rest + ("\n" if rest else "") + block, encoding="utf-8")
+        print(f"  Codex        {short(codex):<28} {state}")
     except OSError:
         print(f"  Codex        {short(codex):<28} skipped (couldn't write it)")
 
-    print(f"\n  Claude Code: run this once:")
-    print(f'    claude mcp add --scope user agent-ledger -- python3 "{script}" mcp')
-    print("\nRestart your agents, then they can call the log_work tool.")
+    print("\n  Claude Code: run this once:")
+    print(f'    claude mcp add --scope user {MCP_NAME} -- python3 "{script}" mcp')
+
+
+def mcp_install_project(project: Path) -> None:
+    configs = [
+        # Cursor resolves ${workspaceFolder} to the folder holding .cursor/mcp.json.
+        ("Cursor", ".cursor/mcp.json",
+         {"command": "python3", "args": ["${workspaceFolder}/%s/ledger.py" % PROJECT_DIR_NAME, "mcp"]}),
+        # Claude Code reads .mcp.json at the project root and starts servers there.
+        ("Claude Code", ".mcp.json",
+         {"command": "python3", "args": ["${CLAUDE_PROJECT_DIR:-.}/%s/ledger.py" % PROJECT_DIR_NAME, "mcp"]}),
+    ]
+    private = False
+    exclude = project / ".git" / "info" / "exclude"
+    if exclude.exists():
+        private = f"/{PROJECT_DIR_NAME}/" in exclude.read_text(encoding="utf-8", errors="ignore").split()
+    hide, tracked = [], []
+    for app, rel, entry in configs:
+        path = project / rel
+        try:
+            state = set_json_server(path, entry)
+            print(f"  {app:<12} {rel:<28} {state} (this project only)")
+            if private:
+                (tracked if is_tracked(project, rel) else hide).append(rel)
+        except (OSError, ValueError):
+            print(f"  {app:<12} {rel:<28} skipped (couldn't read it; add the server by hand)")
+    print(f"  {'Codex':<12} {'(no project-level MCP)':<28} skipped: Codex logs through the AGENTS.md rule")
+    if hide:
+        add_git_exclude(project, [f"/{r}" for r in hide])
+        print(f"  {'':<12} {'.git/info/exclude':<28} MCP config hidden from git (local only)")
+    for rel in tracked:
+        print(f"\n  Note: {rel} is already tracked by git, so the added server will show in `git diff`.")
+
+    # Older versions put a project's server in the user-level config, so every repo logged here.
+    fixed = []
+    cursor = Path.home() / ".cursor" / "mcp.json"
+    if user_entry_points_at_project(cursor, toml=False):
+        try:
+            set_json_server(cursor, None)
+            fixed.append(short(cursor))
+        except (OSError, ValueError):
+            pass
+    codex = Path.home() / ".codex" / "config.toml"
+    if user_entry_points_at_project(codex, toml=True):
+        try:
+            codex.write_text(drop_codex_table(codex.read_text(encoding="utf-8")), encoding="utf-8")
+            fixed.append(short(codex))
+        except OSError:
+            pass
+    if fixed:
+        print(f"\n  Removed an old user-level entry from {' and '.join(fixed)}: it pointed at a project")
+        print("  ledger, so work from every other repo was being logged into that project.")
+    print("\n  Claude Code asks you to approve the project's .mcp.json server the first time.")
+    print(f"  Added it at user level before? Remove that copy:  claude mcp remove --scope user {MCP_NAME}")
 
 
 # ---------------------------------------------------------------- update
