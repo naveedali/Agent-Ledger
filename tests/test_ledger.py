@@ -204,6 +204,20 @@ class TestReports(LedgerTestCase):
             self.assertNotIn("/Users/someone", text)
             self.assertIn("[email]", text)
 
+    def test_digest_redact_hides_private_details_in_printed_and_saved_md(self):
+        for cmd in (["today", "--date", "yesterday", "--redact"], ["compile", "--date", "yesterday", "--redact"]):
+            out = self.run_cli(*cmd, script=self.script).stdout
+            saved = (self.gl / str(dt.date.today() - dt.timedelta(days=1)) / "DIGEST.md").read_text()
+            for text in ((out, saved) if cmd[0] == "today" else (saved,)):
+                self.assertNotIn("dev@example.com", text)
+                self.assertNotIn("/Users/someone", text)
+                self.assertIn("[email]", text)
+        out = self.run_cli("today", "--redact", script=self.script).stdout
+        self.assertNotIn("sk_live_", out)
+        self.assertIn("[secret]", out)
+        out = self.run_cli("today", "--date", "yesterday", script=self.script).stdout
+        self.assertIn("dev@example.com", out)                          # without --redact: full details
+
     def test_digest_html(self):
         self.run_cli("today", "--html", script=self.script)
         page = (self.gl / TODAY / "DIGEST.html").read_text()
@@ -288,6 +302,17 @@ class TestMcp(LedgerTestCase):
         self.assertIn("1 task", digest)
         self.assertIn("client-app", digest)           # project taken from the server's repo
         self.assertIn("Docs", digest)
+
+    def test_daily_digest_redact(self):
+        r = self.rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                          "name": "log_work", "arguments": {"agent": "cursor", "task": "Mailed ana@example.com"}}},
+                     {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                      "params": {"name": "daily_digest", "arguments": {"redact": True}}},
+                     {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                      "params": {"name": "daily_digest", "arguments": {}}})
+        self.assertNotIn("ana@example.com", r[2]["result"]["content"][0]["text"])
+        self.assertIn("[email]", r[2]["result"]["content"][0]["text"])
+        self.assertIn("ana@example.com", r[3]["result"]["content"][0]["text"])
 
     def test_errors_are_reported_not_fatal(self):
         r = self.rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",

@@ -9,8 +9,9 @@ Usage:
         add --no-hook to skip the Claude Code log reminder
   python3 ledger.py today  [--date DATE]    Build the digest and print it
   python3 ledger.py compile [--date DATE]   Build the digest (saves DIGEST.md)
-        add --html to also save DIGEST.html, --open to open it in your browser
-  python3 ledger.py status                  Check the setup / why nothing was logged
+        add --html to also save DIGEST.html, --open to open it in your browser,
+        --redact to hide emails, keys and home-folder paths
+  python3 ledger.py status                 Check the setup / why nothing was logged
   python3 ledger.py log --agent NAME --task "..." [--files ...] [--status PARTIAL|BLOCKED]
                         [--client NAME] [--time 1h30m]
                                             Add an entry to today's log (used by agents)
@@ -566,6 +567,8 @@ def cmd_compile(args, show=False) -> None:
     day_dir = logs / day
     day_dir.mkdir(parents=True, exist_ok=True)
     digest = build_digest(mode, logs, project, day)
+    if "--redact" in args:                       # same as the HTML page and reports: nothing private
+        digest = redact(digest)
     (day_dir / "DIGEST.md").write_text(digest, encoding="utf-8")
     print(digest if show else f"Wrote {short(day_dir / 'DIGEST.md')}")
     if "--html" in args or "--open" in args:
@@ -1641,7 +1644,9 @@ MCP_TOOLS = [
     {"name": "daily_digest",
      "description": "The Agent Ledger digest for one day: tasks done, partial or blocked, follow-ups "
                     "and git commits. Use it when the user asks what was done today.",
-     "inputSchema": {"type": "object", "properties": {"date": _DATE}}},
+     "inputSchema": {"type": "object", "properties": {
+         "date": _DATE,
+         "redact": {"type": "boolean", "description": "Hide emails, keys and home paths", "default": False}}}},
     {"name": "work_report",
      "description": "An Agent Ledger work report for a date range (default: the last 7 days), "
                     "grouped by project and day.",
@@ -1674,7 +1679,8 @@ def mcp_call(name: str, a: dict) -> str:
                          client=a.get("client", ""), time_spent=a.get("time", ""))
         return f"Logged to {short(path)}"
     if name == "daily_digest":
-        return build_digest(mode, logs, project, to_day(a.get("date") or "today"))
+        digest = build_digest(mode, logs, project, to_day(a.get("date") or "today"))
+        return redact(digest) if a.get("redact") else digest
     if name == "work_report":
         until = to_day(a.get("to") or "today")
         since = to_day(a["from"]) if a.get("from") else str(dt.date.fromisoformat(until) - dt.timedelta(days=6))

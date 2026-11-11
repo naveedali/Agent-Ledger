@@ -157,7 +157,7 @@ Restart your agents and they get five tools:
 | Tool | What it does |
 |---|---|
 | `log_work` | Add an entry to today's log (same fields as `ledger.py log`) |
-| `daily_digest` | Today's (or any day's) digest |
+| `daily_digest` | Today's (or any day's) digest, with a `redact` option |
 | `work_report` | A report for a date range, with `project`, `agent` and `redact` options |
 | `standup` | Yesterday / Today / Blockers |
 | `ledger_status` | Check the setup |
@@ -265,7 +265,7 @@ The page has summary tiles, a status bar, an **Activity** chart (tasks per day b
 | `ledger.py init --project [folder] [--private]` | Project mode |
 | `ledger.py init ... --no-hook` | Set up without the Claude Code log reminder |
 | `ledger.py log --agent NAME --task "..."` | Add an entry (agents run this). Options: `--files`, `--status`, `--follow-up`, `--notes`, `--project`, `--client`, `--time` |
-| `ledger.py today` | Build today's digest and print it |
+| `ledger.py today` | Build today's digest and print it. Add `--redact` before pasting it anywhere |
 | `ledger.py compile` | Build today's digest (saves `DIGEST.md`) |
 | `ledger.py compile --date yesterday` | Another day (`yesterday` or `YYYY-MM-DD`) |
 | `ledger.py today --open` | Today's digest as a web page (`--html` saves it without opening) |
