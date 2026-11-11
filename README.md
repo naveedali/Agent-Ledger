@@ -10,12 +10,40 @@ You ask Claude, Codex and Cursor to do the work, and by evening you can't rememb
 - 📄 Plain Markdown files. No server, no account, no tracking
 - 🐍 One Python file, zero dependencies
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/naveedali/Agent-Ledger/main/docs/images/agent-ledger-demo.gif" alt="Installing Agent Ledger, printing a standup, and opening the weekly HTML report in light and dark mode" width="800">
+</p>
+
 ---
 
 ## How it works
 
 1. **Agents log.** After each task, an agent adds a short entry to its own file for the day (`claude.md`, `codex.md`, ...).
 2. **You compile.** Run one command (or ask any agent) and get `DIGEST.md`: what's done, what's blocked, follow-ups, and the day's git commits.
+
+## See it in action
+
+A week of work from Claude, Codex and Cursor across three projects, as one report:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/naveedali/Agent-Ledger/main/docs/images/report-dark.png">
+  <img src="https://raw.githubusercontent.com/naveedali/Agent-Ledger/main/docs/images/report-light.png" alt="Weekly work report: task totals, an activity chart per day and per agent, and a summary table per project" width="800">
+</picture>
+
+Each project's work is grouped by day, with the files changed, time spent, follow-ups and blockers:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/naveedali/Agent-Ledger/main/docs/images/report-detail-dark.png">
+  <img src="https://raw.githubusercontent.com/naveedali/Agent-Ledger/main/docs/images/report-detail-light.png" alt="One project's tasks grouped by day, each with a status, time, agent and the files it changed" width="800">
+</picture>
+
+Sample output, made from demo data:
+
+| Sample | What it is |
+|---|---|
+| [Weekly report (PDF)](https://github.com/naveedali/Agent-Ledger/blob/main/docs/samples/weekly-report.pdf) | The HTML report saved with *Print → Save as PDF* |
+| [Client report for Acme Corp (PDF)](https://github.com/naveedali/Agent-Ledger/blob/main/docs/samples/client-report-acme.pdf) | One client's work and time, ready to attach to an invoice |
+| [Weekly report (Markdown)](https://github.com/naveedali/Agent-Ledger/blob/main/docs/samples/weekly-report.md) | The plain report file that `week` writes |
 
 ## Pick a mode
 
@@ -258,7 +286,7 @@ python3 ~/agent-ledger/ledger.py today --open                 # today's digest
 python3 ~/agent-ledger/ledger.py week --redact --open         # last 7 days
 ```
 
-The page has summary tiles, a status bar, an **Activity** chart (tasks per day by status, and tasks per agent; hover a bar for the numbers), every project's work grouped by day, follow-ups and commits. You can filter by status or search tasks, files and agents. It's a single file with no internet needed, works in light and dark mode, and prints cleanly, so *Print → Save as PDF* gives you a report to attach to an email or invoice.
+The page has summary tiles, a status bar, an **Activity** chart (tasks per day by status, and tasks per agent; hover a bar for the numbers), every project's work grouped by day, follow-ups and commits. You can filter by status or search tasks, files and agents. It's a single file with no internet needed, works in light and dark mode, and prints cleanly, so *Print → Save as PDF* gives you a report to attach to an email or invoice. See the [screenshots and sample PDFs](#see-it-in-action).
 
 ---
 
