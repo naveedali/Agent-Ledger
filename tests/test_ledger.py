@@ -287,6 +287,67 @@ class TestProjectMode(LedgerTestCase):
         self.assertIn("$CLAUDE_PROJECT_DIR", settings["hooks"]["Stop"][0]["hooks"][0]["command"])
 
 
+class TestMcpInstall(LedgerTestCase):
+    def test_project_mode_writes_project_config_only(self):
+        repo = self.git_repo("client-a")
+        self.run_cli("init", "--project", str(repo))
+        out = self.run_cli("mcp-install", script=repo / "ledger" / "ledger.py", cwd=repo).stdout
+        self.assertIn("project mode", out)
+        cursor = json.loads((repo / ".cursor" / "mcp.json").read_text())["mcpServers"]["agent-ledger"]
+        self.assertEqual(cursor["args"], ["${workspaceFolder}/ledger/ledger.py", "mcp"])
+        claude = json.loads((repo / ".mcp.json").read_text())["mcpServers"]["agent-ledger"]
+        self.assertEqual(claude["args"], ["${CLAUDE_PROJECT_DIR:-.}/ledger/ledger.py", "mcp"])
+        self.assertNotIn(str(self.home), json.dumps([cursor, claude]))      # nothing machine-specific
+        # The user-level configs, shared by every repo, are left alone.
+        self.assertFalse((self.home / ".cursor" / "mcp.json").exists())
+        self.assertFalse((self.home / ".codex" / "config.toml").exists())
+        self.assertNotIn("--scope user agent-ledger -- python3", out)
+        self.run_cli("mcp-install", script=repo / "ledger" / "ledger.py", cwd=repo)   # safe to repeat
+
+    def test_private_project_keeps_git_clean(self):
+        repo = self.git_repo("client-b")
+        self.run_cli("init", "--project", str(repo), "--private")
+        self.run_cli("mcp-install", script=repo / "ledger" / "ledger.py", cwd=repo)
+        status = subprocess.run(["git", "status", "--short"], cwd=repo, env=self.env,
+                                capture_output=True, text=True).stdout
+        self.assertEqual(status, "")
+        self.assertTrue((repo / ".mcp.json").exists())
+
+    def test_project_mode_removes_old_user_level_entry(self):
+        repo = self.git_repo("client-c")
+        self.run_cli("init", "--project", str(repo))
+        old = str(repo / "ledger" / "ledger.py")                # what 0.4.2 wrote at user level
+        cursor = self.home / ".cursor" / "mcp.json"
+        cursor.parent.mkdir(parents=True)
+        cursor.write_text(json.dumps({"mcpServers": {"other": {"command": "x"},
+                                                     "agent-ledger": {"command": "python3", "args": [old, "mcp"]}}}))
+        codex = self.home / ".codex" / "config.toml"
+        codex.parent.mkdir(parents=True)
+        codex.write_text(f'model = "o4"\n\n[mcp_servers.agent-ledger]\ncommand = "python3"\n'
+                         f'args = [{json.dumps(old)}, "mcp"]\n\n[mcp_servers.other]\ncommand = "y"\n')
+        out = self.run_cli("mcp-install", script=repo / "ledger" / "ledger.py", cwd=repo).stdout
+        self.assertIn("Removed an old user-level entry", out)
+        self.assertEqual(set(json.loads(cursor.read_text())["mcpServers"]), {"other"})
+        text = codex.read_text()
+        self.assertNotIn("agent-ledger", text)
+        self.assertIn('model = "o4"', text)
+        self.assertIn("[mcp_servers.other]", text)
+
+    def test_global_mode_replaces_stale_codex_entry_and_uses_global_copy(self):
+        self.run_cli("init", "--global")
+        codex = self.home / ".codex" / "config.toml"
+        codex.parent.mkdir(parents=True, exist_ok=True)
+        codex.write_text('[mcp_servers.agent-ledger]\ncommand = "python3"\nargs = ["/old/app/ledger/ledger.py", "mcp"]\n')
+        out = self.run_cli("mcp-install").stdout                 # run from the repo copy, not ~/agent-ledger
+        self.assertIn("global mode", out)
+        text = codex.read_text()
+        self.assertEqual(text.count("[mcp_servers.agent-ledger]"), 1)
+        self.assertNotIn("/old/app", text)
+        self.assertIn(json.dumps(str(self.gl / "ledger.py")), text)
+        cursor = json.loads((self.home / ".cursor" / "mcp.json").read_text())["mcpServers"]["agent-ledger"]
+        self.assertEqual(cursor["args"], [str(self.gl / "ledger.py"), "mcp"])
+
+
 class TestUpdate(LedgerTestCase):
     def test_update_refreshes_an_old_copy(self):
         self.run_cli("init", "--global")
